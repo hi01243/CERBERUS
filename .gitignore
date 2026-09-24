@@ -1,0 +1,28 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.venv/
+Scripts/
+
+# Downloaded AI Models (Too large for GitHub)
+*.pt
+*.task
+yolo11n.pt
+face_landmarker.task
+
+# Dynamically Generated Data (Evidence Images & all subfolders)
+static/violations/
+*.jpg
+*.jpeg
+*.png
+
+# OS & Editor Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
