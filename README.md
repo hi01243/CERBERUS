@@ -1,157 +1,248 @@
-```markdown
-# CERBERUS: Real-Time Vision-Based Examination Proctoring System
+# Classroom Examination Monitoring System
 
-CERBERUS (**C**lassroom **E**xamination **R**isk & **B**ehavioral **E**valuation via **R**eal-time **V**ision **S**ystems) is an automated proctoring pipeline engineered for physical examination environments[cite: 1]. It utilizes dual-engine computer vision to monitor behavioral anomalies—such as prolonged side gazing, unauthorized collaboration, and prohibited devices—while recording audit-logged evidence to a local SQLite database[cite: 1].
+An AI-powered classroom examination monitoring system that uses computer vision and deep learning to detect potential examination violations in real time.
+
+## Features
+
+### Real-Time Monitoring
+
+* Live camera feed monitoring
+* Start and stop monitoring controls
+* Real-time status dashboard
+
+### Prohibited Object Detection
+
+Detects:
+
+* Cell Phones
+* Smartwatches
+
+### Student Behavior Analysis
+
+Detects:
+
+* Prolonged side gazes
+* Student-to-student interaction
+* Excessive leaning toward nearby students
+
+### Evidence Collection
+
+* Automatic screenshot capture of violations
+* Timestamped evidence storage
+* Violation logging to SQLite database
+
+### Tracking System
+
+* Persistent student tracking using ByteTrack
+* Unique student IDs during monitoring
+* Violation association with tracked individuals
+
+---
+
+## Technologies Used
+
+### Backend
+
+* Python
+* Flask
+* SQLite
+
+### Computer Vision & AI
+
+* OpenCV
+* Ultralytics YOLO
+* YOLO11 Pose Estimation
+* ByteTrack
+* NumPy
 
 ---
 
 ## System Architecture
 
-```text
-       [ Physical Surveillance Feed ] (Phone IP Camera / RTSP / USB)
-                                    │
-                                    ▼
-                     [ OpenCV Ingestion Engine ]
-                                    │
-              ┌─────────────────────┴─────────────────────┐
-              ▼                                           ▼
-   [ YOLO11 Object Detection ]                [ YOLO11-Pose Estimation ]
-   (Blacklisted Items: Phones, Watches)       (17 Skeletal Joint Vectors)
-              │                                           │
-              └─────────────────────┬─────────────────────┘
-                                    │
-                        [ Behavioral Telemetry ]
-                 • Angle-Invariant Head Yaw Analysis
-                 • Perspective-Scaled Desk Interaction
-                 • Per-Student Temporal Debounce Timers
-                                    │
-              ┌─────────────────────┴─────────────────────┐
-              ▼                                           ▼
-      [ SQLite Database ]                         [ Flask Web Server ]
-      (cerberus.db Session Logs)                  (Command Center UI)
-              │                                           │
-              ▼                                           ▼
-   [ Static Proof Snapshots ]                 [ Live Stream & Analytics ]
+### Detection Pipeline
 
-```
+1. Camera captures classroom video.
+2. YOLO Object Detection identifies prohibited devices.
+3. YOLO Pose Estimation tracks student posture and head orientation.
+4. Violation rules evaluate:
+
+   * Side gaze duration
+   * Student interaction
+   * Prohibited objects
+5. Evidence image is captured.
+6. Violation is logged into the database.
+7. Dashboard updates in real time.
 
 ---
 
-## Core Features & Rules
+## Detected Violations
 
-* **Angle-Invariant Head Turn (Gaze Tracking):** Evaluates rotational displacement between the head vector ($K_0$ nose) and the chest/shoulder vector ($K_5, K_6$ shoulders) rather than relying on flat 2D camera coordinates, avoiding false triggers from off-center camera angles.
-* **Temporal Gaze Debouncing:** Quick natural glances do not trigger violations. The system tracks student positions and uses a countdown timer ($2.0\text{s}$ threshold) to log only persistent, deliberate turns.
+### Object Violations
 
+| Violation  | Description                            |
+| ---------- | -------------------------------------- |
+| Cell Phone | Phone detected during examination      |
+| Smartwatch | Smartwatch detected during examination |
 
-* **Dynamic Student Interaction & Leaning:** Flags collaboration by tracking proximity between shoulder centers normalized against anatomical shoulder width, alongside torso tilt angles (neck-to-hip vectors) to detect leaning across desks.
+### Behavior Violations
 
-
-* **Prohibited Object Spotting:** Uses YOLO object detection with confidence thresholds to identify cell phones and smartwatch proxies in the testing zone.
-
-
-* **Audit-Trail Logging:** Captures evidence snapshots throttled by a 3.0-second cooldown. Every infraction is written to `cerberus.db` alongside timestamps, confidence scores, and session folders.
-
-
+| Violation           | Description                                                    |
+| ------------------- | -------------------------------------------------------------- |
+| Prolonged Side Gaze | Student continuously looks left or right beyond threshold      |
+| Student Interaction | Students are detected interacting or leaning toward each other |
 
 ---
 
 ## Project Structure
 
 ```text
-cerberus/
-├── app.py                  # Core Flask server & computer vision processing loop
-├── database.py             # SQLite persistence layer & schema management
-├── requirements.txt        # Runtime dependencies
-├── yolo11n.pt              # YOLO object detection weights
-├── yolo11n-pose.pt         # YOLO skeletal pose estimation weights
+project/
+│
+├── app.py
+├── database.py
+│
+├── templates/
+│   └── index.html
+│
 ├── static/
-│   ├── style.css           # Dark-themed dashboard styling
-│   ├── script.js           # Telemetry polling, lightbox, and event listeners
-│   └── violations/         # Structured proof image storage
-│       └── <SESSION_ID>/   # Partitioned session snapshots
-└── templates/
-    └── index.html          # Surveillance HUD and evidence gallery
-
+│   └── violations/
+│
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## Installation & Setup
+## Installation
 
 ### 1. Clone the Repository
 
 ```bash
-git clone [https://github.com/your-username/cerberus.git](https://github.com/your-username/cerberus.git)
-cd cerberus
-
+git clone https://github.com/yourusername/exam-monitoring-system.git
+cd exam-monitoring-system
 ```
 
-### 2. Configure Virtual Environment
+### 2. Create Virtual Environment
 
 ```bash
-python -m venv .venv
-
-# Windows (Command Prompt / PowerShell)
-.venv\Scripts\activate
-
-# Linux / macOS
-source .venv/bin/activate
-
+python -m venv venv
 ```
 
-### 3. Install Dependencies
+### 3. Activate Environment
+
+Windows:
 
 ```bash
-python -m pip install --upgrade pip
-pip install flask opencv-python ultralytics numpy
-
+venv\Scripts\activate
 ```
 
-*(Note: On first execution, the Ultralytics framework will automatically download `yolo11n.pt` and `yolo11n-pose.pt` weights to the root directory).*
+Linux/Mac:
 
----
+```bash
+source venv/bin/activate
+```
 
-## Configuration
+### 4. Install Dependencies
 
-Camera and threshold settings are centralized in `app.py`:
-
-```python
-# Video Source: Use 0 for built-in camera, or replace with phone stream URL:
-camera = cv2.VideoCapture(0)
-# Example: camera = cv2.VideoCapture("[http://192.168.1.15:8080/video](http://192.168.1.15:8080/video)")
-
-CURRENT_SESSION = "SESSION_ROOM_A1"  # Target examination partition
-CAPTURE_COOLDOWN = 3.0               # Minimum seconds between snapshots
-GAZE_DURATION_THRESHOLD = 2.0        # Seconds of sustained turn before flagging
-
+```bash
+pip install -r requirements.txt
 ```
 
 ---
 
-## Usage
+## Required Models
 
-### 1. Launch the Server
+Download or place the following models in the project directory:
+
+```text
+yolo11n.pt
+yolo11n-pose.pt
+```
+
+---
+
+## Run the System
 
 ```bash
 python app.py
-
 ```
 
-### 2. Open the Dashboard
-
-Navigate in your browser to:
+Open your browser and visit:
 
 ```text
-[http://127.0.0.1:5000/](http://127.0.0.1:5000/)
-
+http://127.0.0.1:5000
 ```
 
-### 3. Controls
+---
 
-* Click **ARM MONITORING** to begin inference, skeletal vector tracking, and violation logging.
-* Click **PAUSE SYSTEM** to halt model inference and conserve compute resources.
-* Review evidence in real time through the **Audit Log** and inspect captured snapshots via the interactive **Evidence Repository** gallery.
+## API Routes
 
+### Home Page
+
+```http
+GET /
 ```
 
+### Video Feed
+
+```http
+GET /video_feed
 ```
+
+### Start Monitoring
+
+```http
+POST /start_monitoring
+```
+
+### Stop Monitoring
+
+```http
+POST /stop_monitoring
+```
+
+### Retrieve Violations
+
+```http
+GET /get_violations
+```
+
+### System Statistics
+
+```http
+GET /system_stats
+```
+
+---
+
+## Current Limitations
+
+* Requires clear classroom visibility.
+* Accuracy depends on camera placement and resolution.
+* Smartwatch detection uses the COCO "clock" class as a proxy.
+* Student IDs may change after long occlusions.
+* Thresholds require calibration for each classroom setup.
+
+---
+
+## Future Improvements
+
+* Multi-camera support
+* Student seat mapping
+* Face recognition integration
+* Exam attendance monitoring
+* Advanced cheating behavior analysis
+* Cloud-based monitoring dashboard
+
+---
+
+## Authors
+
+BS Computer Science Students
+Technological University of the Philippines – Manila
+
+---
+
+## Disclaimer
+
+This project is intended for educational and academic research purposes. It serves as a proof-of-concept classroom examination monitoring system and should be validated extensively before deployment in real examination environments.
