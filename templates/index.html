@@ -30,6 +30,10 @@
                 <span class="meta-label">NODE:</span>
                 <span class="meta-value">ROOM_A1_MAIN</span>
             </div>
+            <div class="meta-tag">
+                <span class="meta-label">CAMERAS:</span>
+                <span class="meta-value" id="cameraCountTag">0</span>
+            </div>
             <div class="clock-display" id="clock">--:--:--</div>
         </div>
     </header>
@@ -68,18 +72,43 @@
 
         <!-- Main Surveillance Layout -->
         <div class="surveillance-grid">
-            <!-- Left Side: Live Feed & Primary Controls -->
+            <!-- Left Side: Live Feed(s), Camera Management & Primary Controls -->
             <section class="card feed-panel">
                 <div class="panel-header">
                     <div class="panel-title">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
                         LIVE CAMERA TELEMETRY
                     </div>
-                    <span class="tag live-tag">FPS: 30</span>
+                    <span class="tag live-tag">● LIVE</span>
                 </div>
 
-                <div class="video-container">
-                    <img src="{{ url_for('video_feed') }}" class="video-feed" alt="Surveillance Stream">
+                <!-- Camera Management: scan for local devices, or add an
+                     IP camera (e.g. a phone) by URL. Populated dynamically
+                     -- no code edits or restarts needed to add a camera. -->
+                <div class="camera-manage-panel">
+                    <div class="manage-row">
+                        <button class="tile-btn tile-btn-primary" onclick="scanCameras()">
+                            🔍 Scan for Local Cameras
+                        </button>
+                        <span id="scanStatus" class="scan-status"></span>
+                    </div>
+                    <div id="scanResults" class="scan-results"></div>
+
+                    <div class="manage-row add-camera-form">
+                        <input type="text" id="ipCameraUrl" class="manage-input"
+                               placeholder="IP camera URL, e.g. http://192.168.1.50:8080/video">
+                        <input type="text" id="ipCameraLabel" class="manage-input manage-input-label"
+                               placeholder="Label (optional)">
+                        <button class="tile-btn tile-btn-primary" onclick="addIpCamera()">+ Add</button>
+                    </div>
+                    <div id="addCameraStatus" class="scan-status"></div>
+                </div>
+
+                <!-- Camera tiles, one per registered camera. Rendered by
+                     script.js from GET /cameras -- add a camera above and
+                     a tile appears here automatically. -->
+                <div class="camera-grid" id="cameraGrid">
+                    <div class="empty-state">No cameras registered yet.</div>
                 </div>
 
                 <div class="controls-toolbar">
@@ -90,6 +119,16 @@
                     <button class="btn btn-stop stop-btn" onclick="stopMonitoring()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                         PAUSE SYSTEM
+                    </button>
+                </div>
+
+                <!-- Reset is separated visually from Arm/Pause since it's
+                     destructive and irreversible -- deletes DB rows AND
+                     evidence photos for the whole session (all cameras). -->
+                <div class="danger-zone">
+                    <button class="btn btn-reset" onclick="resetSession()">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        RESET SESSION (Delete All Data)
                     </button>
                 </div>
             </section>
@@ -142,10 +181,7 @@
                     <h3 id="modalType">VIOLATION TYPE</h3>
                     <div class="meta-row"><span>Time:</span> <strong id="modalTime">-</strong></div>
                     <div class="meta-row"><span>Confidence:</span> <strong id="modalConf">-</strong></div>
-                    <!-- New: student row, hidden by script.js when a
-                         violation has no associated track_id (e.g. object
-                         detections, which aren't tied to a specific
-                         tracked person in this version). -->
+                    <div class="meta-row" id="modalCameraRow"><span>Camera:</span> <strong id="modalCamera">-</strong></div>
                     <div class="meta-row" id="modalStudentRow"><span>Student:</span> <strong id="modalStudent">-</strong></div>
                 </div>
             </div>
