@@ -236,9 +236,9 @@ GET /system_stats
 
 ---
 
-## Authors
+## Author/s
 
-BS Computer Science Students
+BS Computer Science Student
 Technological University of the Philippines – Manila
 
 ---
