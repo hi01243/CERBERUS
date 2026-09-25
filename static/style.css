@@ -217,21 +217,172 @@ body {
     border: 1px solid rgba(56, 189, 248, 0.3);
 }
 
-/* Video Frame */
-.video-container {
+/* ===== Camera Management Panel (scan / add IP camera) ===== */
+.camera-manage-panel {
+    padding: 14px 16px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.manage-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.scan-status {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.scan-results {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.scan-add-btn {
+    flex: none;
+}
+
+.manage-input {
+    background: var(--bg-main);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-high);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    flex: 1;
+    min-width: 180px;
+}
+.manage-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+}
+.manage-input-label {
+    flex: 0 0 140px;
+    min-width: 100px;
+}
+
+/* Camera grid: one or more live tiles. Single camera -> one full-width
+   tile. Multiple cameras -> wraps into a responsive grid. */
+.camera-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 2px;
+    background: var(--border-subtle);
+}
+
+.camera-tile {
+    position: relative;
     background: #000;
     aspect-ratio: 4 / 3;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
     overflow: hidden;
+}
+
+.camera-tile-label {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.6);
+    color: var(--accent-blue);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    text-transform: uppercase;
+}
+
+.camera-status-badge {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+}
+.camera-status-badge.status-active {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--accent-green);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+}
+.camera-status-badge.status-paused {
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--accent-amber);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.camera-status-badge.status-inactive {
+    background: rgba(100, 116, 139, 0.2);
+    color: var(--text-muted);
+    border: 1px solid rgba(100, 116, 139, 0.4);
 }
 
 .video-feed {
     width: 100%;
-    height: 100%;
+    flex: 1;
     object-fit: cover;
+    min-height: 0;
 }
+
+.camera-placeholder {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+}
+.camera-placeholder p {
+    font-size: 0.8rem;
+    font-family: var(--font-mono);
+}
+
+.camera-tile-controls {
+    display: flex;
+    gap: 1px;
+    background: var(--border-subtle);
+}
+
+.tile-btn {
+    flex: 1;
+    background: rgba(18, 24, 36, 0.9);
+    border: none;
+    color: var(--text-med);
+    padding: 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: 0.3px;
+    transition: background 0.15s ease;
+}
+.tile-btn:hover { background: rgba(31, 44, 66, 0.95); }
+
+.tile-btn-primary {
+    color: var(--accent-green);
+}
+.tile-btn-primary:hover { background: rgba(16, 185, 129, 0.15); }
+
+.tile-btn-danger {
+    color: var(--accent-red);
+    flex: 0 0 auto;
+    padding: 8px 12px;
+}
+.tile-btn-danger:hover { background: rgba(244, 63, 94, 0.15); }
 
 .controls-toolbar {
     padding: 16px;
@@ -268,6 +419,37 @@ body {
     color: var(--accent-red);
 }
 .btn-stop:hover { background: rgba(244, 63, 94, 0.25); transform: translateY(-1px); }
+
+/* Reset button lives in its own visually-separated "danger zone" so it
+   doesn't get mistaken for or accidentally clicked alongside Arm/Pause --
+   it's destructive and irreversible. */
+.danger-zone {
+    padding: 0 16px 16px;
+    background: var(--bg-surface);
+}
+
+.btn-reset {
+    width: 100%;
+    background: transparent;
+    border: 1px dashed rgba(244, 63, 94, 0.4);
+    color: var(--text-muted);
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.78rem;
+    cursor: pointer;
+    letter-spacing: 0.3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all 0.2s ease;
+}
+.btn-reset:hover {
+    border-color: var(--accent-red);
+    color: var(--accent-red);
+    background: rgba(244, 63, 94, 0.08);
+}
 
 /* Right Incident Stream */
 .log-panel {
@@ -314,8 +496,8 @@ body {
     color: var(--text-muted);
 }
 
-/* Student ID badge -- shown next to timestamps once a violation is tied
-   to a specific YOLO tracker ID (see script.js studentTag()). */
+/* Student ID badge -- shown once a violation is tied to a specific YOLO
+   tracker ID. */
 .student-tag {
     display: inline-block;
     margin-left: 8px;
@@ -325,6 +507,20 @@ body {
     color: var(--accent-purple);
     border: 1px solid rgba(129, 140, 248, 0.3);
     font-size: 0.7rem;
+}
+
+/* Camera source badge -- shown next to the student tag so you can tell
+   which node caught the violation. */
+.camera-tag {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(56, 189, 248, 0.15);
+    color: var(--accent-blue);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    font-size: 0.7rem;
+    text-transform: uppercase;
 }
 
 /* Evidence Gallery */
