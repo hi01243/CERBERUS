@@ -41,6 +41,17 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SMOOTHING_WINDOW = 5
 
+# --- ADAPTIVE "NORMAL POSITION" BASELINE ---
+# These control the per-student gaze baseline: what counts as "forward"
+# for THIS student, which can slowly drift if they hold a new, moderate
+# position steadily (e.g. shifted their chair). Also hand-calibrated --
+# validate against a real test session before demo day.
+CALIBRATION_DURATION = 2.0          # seconds to sample a student's initial "neutral" pose
+BASELINE_ADAPT_RATE = 0.02          # how fast the baseline creeps toward a newly-held position, per eligible frame
+REPOSITION_STABILITY_WINDOW = 10.0  # student must hold a new position this long, undisturbed, before it can shift the baseline
+REPOSITION_JUMP_LIMIT = HEAD_TURN_RATIO_THRESHOLD * 0.8   # only moderate shifts qualify as "repositioning"
+REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3  # how close to the anchor counts as "still in the same spot"
+
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
 # ==========================================
@@ -90,6 +101,11 @@ def add_camera(source, cam_type, label=None):
         "turn_history": {},
         "interaction_timers": {},
         "last_capture_time": 0,
+        # --- adaptive baseline state, per track_id ---
+        "baseline_ratio": {},      # track_id -> current "forward" ratio for this student
+        "calibration_start": {},   # track_id -> time first seen (drives initial sampling window)
+        "stable_since": {},        # track_id -> time the current anchor position was first held
+        "stable_anchor": {},       # track_id -> ratio value currently being held/tested for repositioning
     }
     with registry_lock:
         camera_registry[cam_id] = entry
@@ -140,6 +156,10 @@ def pause_camera(cam_id):
         entry["gaze_timers"].clear()
         entry["turn_history"].clear()
         entry["interaction_timers"].clear()
+        entry["baseline_ratio"].clear()
+        entry["calibration_start"].clear()
+        entry["stable_since"].clear()
+        entry["stable_anchor"].clear()
 
     return True, "paused"
 
@@ -261,6 +281,10 @@ def generate_frames(camera_id):
         gaze_timers = entry["gaze_timers"]
         turn_history = entry["turn_history"]
         pair_timers = entry["interaction_timers"]
+        baseline_ratio = entry["baseline_ratio"]
+        calib_start = entry["calibration_start"]
+        stable_since = entry["stable_since"]
+        stable_anchor = entry["stable_anchor"]
 
         cv2.putText(frame, f"CAM: {entry['label']}", (20, h - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
@@ -269,6 +293,10 @@ def generate_frames(camera_id):
             gaze_timers.clear()
             turn_history.clear()
             pair_timers.clear()
+            baseline_ratio.clear()
+            calib_start.clear()
+            stable_since.clear()
+            stable_anchor.clear()
             cv2.putText(frame, "MONITORING PAUSED", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -385,14 +413,19 @@ def generate_frames(camera_id):
                                 (shoulder_center[0] - 20, shoulder_center[1] + 25),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
-                    # --- HEAD YAW: HORIZONTAL-DISPLACEMENT RATIO ---
-                    # Measures only the sideways nose offset from the
-                    # shoulder-line midpoint, in a coordinate frame rotated
-                    # to account for the student's seat/torso angle. This
-                    # deliberately ignores vertical (pitch) movement, so
-                    # looking down at an exam paper doesn't get conflated
-                    # with turning sideways.
+                    # --- HEAD YAW: HORIZONTAL-DISPLACEMENT RATIO, WITH
+                    #     ADAPTIVE PER-STUDENT "NORMAL POSITION" BASELINE ---
+                    # Measures the sideways nose offset from the shoulder-
+                    # line midpoint, in a coordinate frame rotated to
+                    # account for the student's seat/torso angle (ignores
+                    # pitch, so looking down at a paper isn't conflated
+                    # with turning sideways). That raw ratio is then
+                    # compared against THIS student's own learned
+                    # "forward" baseline rather than a universal zero,
+                    # so students seated off-center or with a slightly
+                    # skewed natural posture aren't penalized for it.
                     person_turn = "FORWARD"
+                    smoothed_ratio = 0.0
 
                     if nose_confident and nose[0] > 0 and l_shoulder[0] > 0 and r_shoulder[0] > 0:
                         d_x_sh = r_shoulder[0] - l_shoulder[0]
@@ -408,21 +441,68 @@ def generate_frames(camera_id):
                         cos_t = math.cos(-shoulder_angle_rad)
                         sin_t = math.sin(-shoulder_angle_rad)
                         sideways_offset = d_x_head * cos_t - d_y_head * sin_t
-                        sideways_ratio = sideways_offset / (shoulder_width / 2.0)
+                        raw_ratio = sideways_offset / (shoulder_width / 2.0)
 
-                        if track_id not in turn_history:
-                            turn_history[track_id] = deque(maxlen=SMOOTHING_WINDOW)
-                        turn_history[track_id].append(sideways_ratio)
-                        smoothed_ratio = sum(turn_history[track_id]) / len(turn_history[track_id])
+                        if track_id not in calib_start:
+                            # First time seeing this student -- start their
+                            # calibration window and seed the baseline at
+                            # their current pose.
+                            calib_start[track_id] = current_time
+                            baseline_ratio[track_id] = raw_ratio
+                            stable_since[track_id] = current_time
+                            stable_anchor[track_id] = raw_ratio
 
-                        if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
-                            person_turn = "LOOKING LEFT"
-                        elif smoothed_ratio > HEAD_TURN_RATIO_THRESHOLD:
-                            person_turn = "LOOKING RIGHT"
+                        if current_time - calib_start[track_id] < CALIBRATION_DURATION:
+                            # Still sampling this student's initial "neutral"
+                            # pose -- snap the baseline to what we see and
+                            # don't flag anything yet.
+                            baseline_ratio[track_id] = raw_ratio
+                            person_turn = "CALIBRATING"
+                        else:
+                            baseline = baseline_ratio[track_id]
+                            adjusted_ratio = raw_ratio - baseline
+
+                            if track_id not in turn_history:
+                                turn_history[track_id] = deque(maxlen=SMOOTHING_WINDOW)
+                            turn_history[track_id].append(adjusted_ratio)
+                            smoothed_ratio = sum(turn_history[track_id]) / len(turn_history[track_id])
+
+                            if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
+                                person_turn = "LOOKING LEFT"
+                            elif smoothed_ratio > HEAD_TURN_RATIO_THRESHOLD:
+                                person_turn = "LOOKING RIGHT"
+
+                            # --- Slow repositioning: let the baseline drift
+                            # toward a new pose only if it's a moderate,
+                            # steadily-held shift and the student is NOT
+                            # currently mid-violation. This lets someone who
+                            # resettles in their chair get a new "normal"
+                            # without letting an active side-gaze slowly
+                            # retrain itself into being accepted. ---
+                            currently_flagged = track_id in gaze_timers
+
+                            if currently_flagged or abs(adjusted_ratio) > REPOSITION_JUMP_LIMIT:
+                                stable_since[track_id] = current_time
+                                stable_anchor[track_id] = raw_ratio
+                            else:
+                                if abs(raw_ratio - stable_anchor[track_id]) > REPOSITION_SETTLE_BAND:
+                                    # Moved to a different spot -- restart
+                                    # the stability clock there.
+                                    stable_since[track_id] = current_time
+                                    stable_anchor[track_id] = raw_ratio
+                                else:
+                                    held_duration = current_time - stable_since[track_id]
+                                    if held_duration >= REPOSITION_STABILITY_WINDOW:
+                                        # Held a moderate, steady offset long
+                                        # enough -- nudge baseline gently
+                                        # toward it instead of snapping.
+                                        baseline_ratio[track_id] += BASELINE_ADAPT_RATE * (
+                                            raw_ratio - baseline_ratio[track_id]
+                                        )
 
                     active_ids.append(track_id)
 
-                    if person_turn != "FORWARD":
+                    if person_turn not in ("FORWARD", "CALIBRATING"):
                         if track_id not in gaze_timers:
                             gaze_timers[track_id] = current_time
                         elapsed = current_time - gaze_timers[track_id]
@@ -444,6 +524,10 @@ def generate_frames(camera_id):
                     else:
                         gaze_timers.pop(track_id, None)
                         turn_history.pop(track_id, None)
+                        if person_turn == "CALIBRATING":
+                            cv2.putText(frame, "CALIBRATING...",
+                                        (shoulder_center[0] - 55, max(20, shoulder_center[1] - 40)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
 
         except Exception as e:
             print(f"[{camera_id}] Pose estimation error: {e}")
@@ -452,6 +536,10 @@ def generate_frames(camera_id):
 
         entry["gaze_timers"] = {k: v for k, v in gaze_timers.items() if k in active_ids}
         entry["turn_history"] = {k: v for k, v in turn_history.items() if k in active_ids}
+        entry["baseline_ratio"] = {k: v for k, v in baseline_ratio.items() if k in active_ids}
+        entry["calibration_start"] = {k: v for k, v in calib_start.items() if k in active_ids}
+        entry["stable_since"] = {k: v for k, v in stable_since.items() if k in active_ids}
+        entry["stable_anchor"] = {k: v for k, v in stable_anchor.items() if k in active_ids}
 
         # ==========================================
         # 3. ATTRIBUTE OBJECT DETECTIONS TO A STUDENT
@@ -702,6 +790,10 @@ def reset_session():
         entry["gaze_timers"].clear()
         entry["turn_history"].clear()
         entry["interaction_timers"].clear()
+        entry["baseline_ratio"].clear()
+        entry["calibration_start"].clear()
+        entry["stable_since"].clear()
+        entry["stable_anchor"].clear()
         entry["last_capture_time"] = 0
 
     return jsonify({"status": "reset", "session_id": CURRENT_SESSION})
