@@ -1,4 +1,4 @@
-from flask import Flask, render_template, Response, jsonify, request
+from flask import Flask, render_template, Response, jsonify, request, send_from_directory
 import cv2
 from ultralytics import YOLO
 import os
@@ -12,11 +12,14 @@ import numpy as np
 
 # Database helper functions from database.py
 from database import init_db, log_violation, get_recent_violations, clear_violations
+from recording import (SessionRecorder, IncidentTracker, init_incident_db,
+                       list_incidents, clear_incidents, RECORDINGS_FOLDER)
 
 app = Flask(__name__)
 
 # Initialize SQLite database schema
 init_db()
+init_incident_db()
 
 VIOLATION_FOLDER = os.path.join('static', 'violations')
 os.makedirs(VIOLATION_FOLDER, exist_ok=True)
@@ -83,6 +86,12 @@ def _generate_camera_id():
     return cam_id
 
 
+def _finish_recording(entry):
+    """Closes the open recording and flushes open incidents. Safe to call repeatedly."""
+    entry["incidents"].finish()
+    entry["recorder"].close()
+
+
 def add_camera(source, cam_type, label=None):
     """Registers a camera as INACTIVE. Does not open the device or load
     models -- that happens on activate_camera(), so registering (or
@@ -100,7 +109,8 @@ def add_camera(source, cam_type, label=None):
         "gaze_timers": {},
         "turn_history": {},
         "interaction_timers": {},
-        "last_capture_time": 0,
+        "recorder": SessionRecorder(CURRENT_SESSION, cam_id),
+        "incidents": IncidentTracker(),
         # --- adaptive baseline state, per track_id ---
         "baseline_ratio": {},      # track_id -> current "forward" ratio for this student
         "calibration_start": {},   # track_id -> time first seen (drives initial sampling window)
@@ -152,6 +162,7 @@ def pause_camera(cam_id):
         if entry["cap"] is not None:
             entry["cap"].release()
             entry["cap"] = None
+        _finish_recording(entry)
         entry["status"] = "paused"
         entry["gaze_timers"].clear()
         entry["turn_history"].clear()
@@ -175,6 +186,8 @@ def remove_camera(cam_id):
     with entry["lock"]:
         if entry["cap"] is not None:
             entry["cap"].release()
+
+    _finish_recording(entry)
 
     with registry_lock:
         camera_registry.pop(cam_id, None)
@@ -231,6 +244,17 @@ def make_status_frame(label, message, sub_message=""):
 
 
 def generate_frames(camera_id):
+    """Wrapper so a closed browser tab or an error still finalizes the
+    recording instead of leaving a half-written file."""
+    try:
+        yield from _generate_frames(camera_id)
+    finally:
+        entry = camera_registry.get(camera_id)
+        if entry is not None:
+            _finish_recording(entry)
+
+
+def _generate_frames(camera_id):
     while True:
         entry = camera_registry.get(camera_id)
         if entry is None:
@@ -240,6 +264,7 @@ def generate_frames(camera_id):
             break
 
         if entry["status"] != "active":
+            _finish_recording(entry)
             msg = "PAUSED" if entry["status"] == "paused" else "NOT IN USE"
             placeholder = make_status_frame(entry["label"], msg, "Click 'Use' on the dashboard")
             ret, buffer = cv2.imencode('.jpg', placeholder)
@@ -297,6 +322,7 @@ def generate_frames(camera_id):
             calib_start.clear()
             stable_since.clear()
             stable_anchor.clear()
+            _finish_recording(entry)
             cv2.putText(frame, "MONITORING PAUSED", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -629,26 +655,28 @@ def generate_frames(camera_id):
         cv2.putText(frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
 
         # ==========================================
-        # 6. AUTOMATIC EVIDENCE CAPTURE & DB LOGGING
+        # 6. SESSION RECORDING + INCIDENT LOGGING
         # ==========================================
+        # Every loop the annotated frame goes into the session recording.
+        # A violation is an INCIDENT pointing into that recording: repeated
+        # triggers for the same student + type extend one incident rather
+        # than writing a new photo each time (see recording.py).
+        entry["recorder"].write(frame)
+
         is_violating = object_violation or interaction_violation or gaze_trigger
 
-        if is_violating and (current_time - entry["last_capture_time"] > CAPTURE_COOLDOWN):
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{violation_reason}_{timestamp_str}.jpg"
-
-            session_dir = os.path.join(VIOLATION_FOLDER, CURRENT_SESSION, camera_id)
-            os.makedirs(session_dir, exist_ok=True)
-
-            disk_path = os.path.join(session_dir, filename)
-            web_path = f"violations/{CURRENT_SESSION}/{camera_id}/{filename}"
-
-            cv2.imwrite(disk_path, frame)
-            log_violation(CURRENT_SESSION, violation_reason, violation_confidence,
-                          web_path, student_track_id=violating_track_id, camera_id=camera_id)
-            print(f"[{camera_id}] CAPTURED {web_path} (track_id={violating_track_id})")
-
-            entry["last_capture_time"] = current_time
+        if is_violating:
+            inc, is_new = entry["incidents"].observe(
+                entry["recorder"], frame, violation_reason, violating_track_id,
+                violation_confidence, CURRENT_SESSION, camera_id,
+                thumb_dir=os.path.join(VIOLATION_FOLDER, CURRENT_SESSION, camera_id),
+                thumb_web_prefix=f"violations/{CURRENT_SESSION}/{camera_id}")
+            if is_new:
+                log_violation(CURRENT_SESSION, violation_reason, violation_confidence,
+                              inc["thumb_web"], student_track_id=violating_track_id,
+                              camera_id=camera_id)
+                print(f"[{camera_id}] NEW INCIDENT {violation_reason} "
+                      f"(track_id={violating_track_id}, t={inc['start']:.1f}s)")
 
         ret, buffer = cv2.imencode('.jpg', frame)
         yield (b'--frame\r\n'
@@ -779,7 +807,12 @@ def reset_session():
             "message": "Stop monitoring before resetting."
         }), 400
 
+    for _entry in list(camera_registry.values()):
+        _finish_recording(_entry)
+
     clear_violations(CURRENT_SESSION)
+    clear_incidents(CURRENT_SESSION)
+    shutil.rmtree(os.path.join(RECORDINGS_FOLDER, CURRENT_SESSION), ignore_errors=True)
 
     session_dir = os.path.join(VIOLATION_FOLDER, CURRENT_SESSION)
     if os.path.isdir(session_dir):
@@ -794,9 +827,28 @@ def reset_session():
         entry["calibration_start"].clear()
         entry["stable_since"].clear()
         entry["stable_anchor"].clear()
-        entry["last_capture_time"] = 0
 
     return jsonify({"status": "reset", "session_id": CURRENT_SESSION})
+
+
+@app.route('/review')
+def review():
+    return render_template('review.html')
+
+
+@app.route('/incidents')
+def incidents_route():
+    rows = list_incidents(CURRENT_SESSION)
+    for r in rows:
+        r['video_url'] = f"/recordings/{r['recording']}" if r['recording'] else None
+        r['thumb_url'] = f"/static/{r['thumb']}" if r['thumb'] else None
+    return jsonify(rows)
+
+
+@app.route('/recordings/<path:filepath>')
+def serve_recording(filepath):
+    # conditional=True enables HTTP Range requests, which <video> needs for seeking.
+    return send_from_directory(RECORDINGS_FOLDER, filepath, conditional=True)
 
 
 @app.route('/system_stats')

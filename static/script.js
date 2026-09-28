@@ -388,6 +388,12 @@ function openModal(v) {
         studentRow.style.display = "none";
     }
 
+    const videoLink = document.getElementById("modalVideoLink");
+    if (videoLink) {
+        videoLink.href = `/review?thumb=${encodeURIComponent(v.image_path)}`;
+        videoLink.style.display = "";
+    }
+
     document.getElementById("imageModal").style.display = "flex";
 }
 
