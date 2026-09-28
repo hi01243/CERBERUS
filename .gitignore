@@ -26,3 +26,19 @@ static/violations/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Student data: never commit
+recordings/
+static/violations/
+incidents.db
+*.db
+
+# Model weights (downloaded automatically)
+*.pt
+
+# Python / patch leftovers
+__pycache__/
+*.pyc
+*.bak
+.venv/
+venv/
