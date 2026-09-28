@@ -37,8 +37,5 @@ incidents.db
 *.pt
 
 # Python / patch leftovers
-__pycache__/
 *.pyc
 *.bak
-.venv/
-venv/
