@@ -216,19 +216,30 @@ async function stopMonitoring() {
     }
 }
 
-// Destructive: wipes DB rows + evidence photos for the whole session,
-// across every camera.
+// Fix 9: destructive action -- wipes DB rows, recordings, and evidence
+// photos for the whole session, across every camera. A single-click
+// confirm() was too easy to fire by accident, so the operator must now
+// TYPE the exact phrase the backend also checks (see RESET_CONFIRM_PHRASE
+// in app.py). Mismatched or empty input aborts with no request sent.
+const RESET_CONFIRM_PHRASE = "DELETE ALL DATA";
+
 async function resetSession() {
-    if (!confirm(
-        "This will permanently delete ALL logged violations and evidence " +
-        "photos for this session, across every camera. This cannot be undone.\n\n" +
-        "Continue?"
-    )) {
+    const typed = prompt(
+        `This permanently deletes ALL recordings, incidents, and evidence for ` +
+        `this session, across every camera. This cannot be undone.\n\n` +
+        `Type "${RESET_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== RESET_CONFIRM_PHRASE) {
+        if (typed !== null) alert("Text didn't match — reset cancelled.");
         return;
     }
 
     try {
-        const res = await fetch('/reset_session', { method: 'POST' });
+        const res = await fetch('/reset_session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: typed })
+        });
         const data = await res.json();
 
         if (!res.ok) {
@@ -243,6 +254,51 @@ async function resetSession() {
     } catch (err) {
         console.error("Reset failed:", err);
         alert("Reset failed — check the browser console.");
+    }
+}
+
+// ==========================================
+// PER-EXAM SESSIONS (Fix 10)
+// ==========================================
+
+async function loadSessionId() {
+    try {
+        const res = await fetch('/session');
+        if (!res.ok) return;
+        const data = await res.json();
+        const tag = document.getElementById("sessionIdTag");
+        if (tag) tag.innerText = data.session_id || "-";
+    } catch (err) {
+        console.error("Failed to load session id:", err);
+    }
+}
+
+async function promptNewSession() {
+    const name = prompt(
+        "Start a new session (e.g. for a different exam or room).\n" +
+        "Monitoring must be paused first. Enter a name:"
+    );
+    if (!name || !name.trim()) return;
+
+    try {
+        const res = await fetch('/session/new', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            alert(data.message || "Could not start a new session.");
+            return;
+        }
+        loadSessionId();
+        cachedViolationIds = "";
+        rawViolations = [];
+        renderFeedAndGallery();
+        loadStats();
+    } catch (err) {
+        console.error("New session failed:", err);
+        alert("Failed to start a new session — check the console.");
     }
 }
 
@@ -273,6 +329,9 @@ async function loadStats() {
             statusLabel.className = "stat-value offline";
             statusDot.className = "indicator-dot offline";
         }
+
+        const tag = document.getElementById("sessionIdTag");
+        if (tag && data.session_id) tag.innerText = data.session_id;
     } catch (err) {
         console.error("Failed to load telemetry:", err);
     }
@@ -406,6 +465,7 @@ document.addEventListener("DOMContentLoaded", () => {
     loadCameras();
     loadStats();
     loadViolations();
+    loadSessionId();
 
     document.querySelectorAll(".filter-btn").forEach(btn => {
         btn.addEventListener("click", (e) => {

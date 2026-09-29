@@ -28,6 +28,14 @@ RECORD_FPS = 10.0             # fixed output fps (real time is preserved by dupl
 RECORD_MAX_WIDTH = 960        # wider frames are downscaled to keep files small
 MAX_CATCHUP_FRAMES = 30       # cap on duplicated frames after a stall
 
+# Fix 7: a crash, power loss, or forced quit mid-exam otherwise leaves one
+# giant recording file open (and unplayable) for the whole session. Rotating
+# to a fresh file every RECORD_CHUNK_SEC caps the damage to at most one
+# chunk, and means incidents automatically split cleanly across chunk
+# boundaries (see IncidentTracker.observe: a recording-path change closes
+# the open incident and starts a new one).
+RECORD_CHUNK_SEC = 300.0      # 5 minutes per file
+
 INCIDENT_GAP_SEC = 10.0       # same student + type within this gap = same incident
 CONF_OVERWRITE_MARGIN = 0.10  # replace the thumbnail only if a clearly better detection arrives
 DB_UPDATE_EVERY = 1.0         # throttle end_offset writes while an incident is ongoing
@@ -92,11 +100,21 @@ class SessionRecorder:
         self._t0, self._frames = now, 0
         return True
 
+    def _rotate_locked(self):
+        """Finalizes the current file and clears writer state so the next
+        write() call opens a fresh one. Caller must already hold self.lock."""
+        self.writer.release()
+        threading.Thread(target=_finalize, args=(self._tmp, self._final, self._codec),
+                         daemon=True).start()
+        self.writer = None
+
     def write(self, frame):
         now = time.time()
         with self.lock:
             if self._failed:
                 return
+            if self.writer is not None and (now - self._t0) >= RECORD_CHUNK_SEC:
+                self._rotate_locked()
             if self.writer is None and not self._open(frame, now):
                 return
             if (frame.shape[1], frame.shape[0]) != self._size:
@@ -139,6 +157,29 @@ def _finalize(tmp, final, codec):
         print(f"Recording finalize error: {e}")
 
 
+def cleanup_orphaned_recordings():
+    """Fix 7: on startup, finalize any *.tmp.mp4 left behind by a crash,
+    forced quit, or power loss during a previous run -- otherwise that
+    chunk stays permanently unplayable and its incidents point nowhere.
+    Call once, before the app starts serving requests."""
+    if not os.path.isdir(RECORDINGS_FOLDER):
+        return
+    recovered = 0
+    for root, _dirs, files in os.walk(RECORDINGS_FOLDER):
+        for name in files:
+            if not name.endswith(".tmp.mp4"):
+                continue
+            tmp = os.path.join(root, name)
+            final = tmp[: -len(".tmp.mp4")] + ".mp4"
+            # Codec used before the crash is unknown; "mp4v" makes _finalize
+            # always attempt the ffmpeg re-encode path when ffmpeg exists,
+            # which is the safe assumption either way.
+            _finalize(tmp, final, "mp4v")
+            recovered += 1
+    if recovered:
+        print(f"[recording] Recovered {recovered} recording(s) left open by a previous crash.")
+
+
 # ==========================================
 # INCIDENT INDEX (own SQLite file, doesn't touch database.py)
 # ==========================================
@@ -158,6 +199,17 @@ def init_incident_db():
             violation_type TEXT, start_offset REAL, end_offset REAL,
             confidence REAL, recording TEXT, thumb TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    # Fix 6: lets a reviewer mark a flag as a false positive without deleting
+    # the underlying evidence. Added via ALTER so existing incidents.db files
+    # (from before this column existed) upgrade in place instead of breaking.
+    try:
+        _q("ALTER TABLE incidents ADD COLUMN dismissed INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+
+def dismiss_incident(inc_id, dismissed=True):
+    _q("UPDATE incidents SET dismissed=? WHERE id=?", (1 if dismissed else 0, inc_id))
 
 
 def create_incident(session_id, camera_id, track_id, vtype, offset, conf, recording, thumb):
