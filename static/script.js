@@ -315,6 +315,7 @@ async function loadStats() {
         document.getElementById("totalAlerts").innerText = data.total_violations ?? 0;
         document.getElementById("phoneAlerts").innerText = data.phone ?? 0;
         document.getElementById("interactionAlerts").innerText = data.interaction ?? 0;
+        document.getElementById("reachAlerts").innerText = data.reach ?? 0;
         document.getElementById("gazeAlerts").innerText = data.gaze ?? 0;
 
         const statusLabel = document.getElementById("monitorStatus");
