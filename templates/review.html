@@ -1,336 +1,235 @@
 <!doctype html>
 <html lang="en">
-
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CERBERUS - Incident review</title>
-  <style>
-    :root {
-      --bg: #12141a;
-      --panel: #1b1f28;
-      --line: #2c3240;
-      --text: #e7e9ee;
-      --muted: #8e97a8;
-      --flag: #f2b134;
-      --dim: #3a4050;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.45 system-ui, sans-serif;
-    }
-
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 14px 20px;
-      border-bottom: 1px solid var(--line);
-    }
-
-    header h1 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 600;
-    }
-
-    button,
-    header a {
-      background: var(--panel);
-      color: var(--text);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 6px 12px;
-      font: inherit;
-      text-decoration: none;
-      cursor: pointer;
-    }
-
-    button:focus-visible,
-    .card:focus-visible,
-    .mark:focus-visible {
-      outline: 2px solid var(--flag);
-      outline-offset: 2px;
-    }
-
-    main {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
-      gap: 16px;
-      padding: 16px 20px;
-    }
-
-    @media (max-width:900px) {
-      main {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    video {
-      width: 100%;
-      max-height: 62vh;
-      background: #000;
-      border-radius: 8px;
-    }
-
-    #timeline {
-      position: relative;
-      height: 28px;
-      margin-top: 10px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-    }
-
-    .mark {
-      position: absolute;
-      top: 4px;
-      bottom: 4px;
-      min-width: 5px;
-      background: var(--flag);
-      border: 0;
-      padding: 0;
-      border-radius: 2px;
-    }
-
-    .mark.dismissed {
-      background: var(--dim);
-    }
-
-    #note {
-      color: var(--muted);
-      margin: 8px 0 0;
-      min-height: 1.4em;
-    }
-
-    #list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-height: 82vh;
-      overflow: auto;
-    }
-
-    .card {
-      display: flex;
-      gap: 10px;
-      padding: 8px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      cursor: pointer;
-    }
-
-    .card[aria-current="true"] {
-      border-color: var(--flag);
-    }
-
-    .card.dismissed {
-      opacity: 0.5;
-    }
-
-    .card img {
-      width: 112px;
-      height: 63px;
-      object-fit: cover;
-      border-radius: 4px;
-      background: #000;
-      flex: none;
-    }
-
-    .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 8px;
-      flex: 1;
-      min-width: 0;
-    }
-
-    .type {
-      font-weight: 600;
-    }
-
-    .meta {
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .dismiss-badge {
-      font-size: 11px;
-      color: var(--dim);
-      border: 1px solid var(--dim);
-      border-radius: 4px;
-      padding: 1px 6px;
-      white-space: nowrap;
-    }
-
-    .dismiss-btn {
-      font-size: 11px;
-      padding: 3px 8px;
-      white-space: nowrap;
-    }
-
-    #filters {
-      display: flex;
-      gap: 6px;
-      padding: 0 20px 12px;
-    }
-
-    #filters button {
-      font-size: 12px;
-      padding: 4px 10px;
-    }
-
-    #filters button.active {
-      border-color: var(--flag);
-      color: var(--flag);
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERBERUS - Incident review</title>
+<style>
+  :root { --bg:#12141a; --panel:#1b1f28; --line:#2c3240; --text:#e7e9ee; --muted:#8e97a8; --flag:#f2b134; --dim:#3a4050; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:16px; font-weight:600; }
+  button, header a { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 12px; font:inherit; text-decoration:none; cursor:pointer; }
+  button:focus-visible, .card:focus-visible, .mark:focus-visible { outline:2px solid var(--flag); outline-offset:2px; }
+  main { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:16px; padding:16px 20px; }
+  @media (max-width:900px) { main { grid-template-columns:1fr; } }
+  video { width:100%; max-height:62vh; background:#000; border-radius:8px; }
+  #timeline { position:relative; height:28px; margin-top:10px; background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  .mark { position:absolute; top:4px; bottom:4px; min-width:5px; background:var(--flag); border:0; padding:0; border-radius:2px; }
+  .mark.dismissed { background:var(--dim); }
+  #note { color:var(--muted); margin:8px 0 0; min-height:1.4em; }
+  #list { display:flex; flex-direction:column; gap:8px; max-height:82vh; overflow:auto; }
+  .card { display:flex; gap:10px; padding:8px; background:var(--panel); border:1px solid var(--line); border-radius:6px; cursor:pointer; }
+  .card[aria-current="true"] { border-color:var(--flag); }
+  .card.dismissed { opacity:0.5; }
+  .card img { width:112px; height:63px; object-fit:cover; border-radius:4px; background:#000; flex:none; }
+  .row { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; flex:1; min-width:0; }
+  .type { font-weight:600; }
+  .meta { color:var(--muted); font-size:12px; }
+  .dismiss-badge { font-size:11px; color:var(--dim); border:1px solid var(--dim); border-radius:4px; padding:1px 6px; white-space:nowrap; }
+  .dismiss-btn { font-size:11px; padding:3px 8px; white-space:nowrap; }
+  .group-badge { font-size:11px; color:var(--flag); border:1px solid var(--flag); border-radius:4px; padding:1px 6px; white-space:nowrap; }
+  .cam-picker { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
+  .cam-btn { font-size:11px; padding:2px 7px; }
+  .cam-btn.active { border-color:var(--flag); color:var(--flag); }
+  #filters { display:flex; gap:6px; padding:0 20px 12px; }
+  #filters button { font-size:12px; padding:4px 10px; }
+  #filters button.active { border-color:var(--flag); color:var(--flag); }
+</style>
 </head>
-
 <body>
-  <header>
-    <h1>Incident review</h1>
-    <div><button id="refresh">Refresh</button> <a href="/">Dashboard</a></div>
-  </header>
-  <div id="filters">
-    <button class="active" data-filter="all">All</button>
-    <button data-filter="active">Active only</button>
-    <button data-filter="dismissed">Dismissed only</button>
-  </div>
-  <main>
-    <section>
-      <video id="player" controls preload="metadata"></video>
-      <div id="timeline" aria-label="Incidents in this recording"></div>
-      <p id="note">Select an incident to play its recording from 5 seconds before the alert.</p>
-    </section>
-    <section id="list" aria-label="Incidents"></section>
-  </main>
-  <script>
-    const LEAD_IN = 5;
-    const player = document.getElementById('player');
-    const listEl = document.getElementById('list');
-    const timeline = document.getElementById('timeline');
-    const note = document.getElementById('note');
-    let incidents = [], current = null, listFilter = 'all';
+<header>
+  <h1>Incident review</h1>
+  <div><button id="refresh">Refresh</button> <a href="/">Dashboard</a></div>
+</header>
+<div id="filters">
+  <button class="active" data-filter="all">All</button>
+  <button data-filter="active">Active only</button>
+  <button data-filter="dismissed">Dismissed only</button>
+</div>
+<main>
+  <section>
+    <video id="player" controls preload="metadata"></video>
+    <div id="timeline" aria-label="Incidents in this recording"></div>
+    <p id="note">Select an incident to play its recording from 5 seconds before the alert.</p>
+  </section>
+  <section id="list" aria-label="Incidents"></section>
+</main>
+<script>
+const LEAD_IN = 5;
+// Incidents from different cameras within this many seconds of each other,
+// of the same violation type, are almost certainly the same real event
+// seen from two angles -- not two separate cheating incidents. They're
+// grouped for display only; nothing in the underlying data is merged or
+// deleted, so each camera's own evidence and dismiss state stay intact.
+const GROUP_WINDOW_SEC = 5;
 
-    const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-    const label = t => t.replaceAll('_', ' ').toLowerCase();
+const player = document.getElementById('player');
+const listEl = document.getElementById('list');
+const timeline = document.getElementById('timeline');
+const note = document.getElementById('note');
+let incidents = [], groups = [], current = null, listFilter = 'all';
 
-    async function load() {
-      incidents = await (await fetch('/incidents')).json();
-      render();
-      // Deep link from the dashboard: /review?thumb=<evidence image path>
-      const want = new URLSearchParams(location.search).get('thumb');
-      if (want && !player.getAttribute('src')) {
-        const hit = incidents.find(i => i.thumb === want);
-        if (hit) openIncident(hit);
-      }
-    }
+const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const label = t => t.replaceAll('_', ' ').toLowerCase();
 
-    function render() {
-      listEl.innerHTML = '';
-      const visible = incidents.filter(inc => {
-        if (listFilter === 'active') return !inc.dismissed;
-        if (listFilter === 'dismissed') return !!inc.dismissed;
-        return true;
-      });
-      if (!visible.length) { listEl.textContent = 'No incidents under this filter.'; return; }
+async function load() {
+  incidents = await (await fetch('/incidents')).json();
+  render();
+  // Deep link from the dashboard: /review?thumb=<evidence image path>
+  const want = new URLSearchParams(location.search).get('thumb');
+  if (want && !player.getAttribute('src')) {
+    const hit = incidents.find(i => i.thumb === want);
+    if (hit) openIncident(hit);
+  }
+}
 
-      for (const inc of visible) {
-        const card = document.createElement('div');
-        card.className = 'card' + (inc.dismissed ? ' dismissed' : '');
-        card.tabIndex = 0;
-        card.dataset.id = inc.id;
-        const dur = Math.max(1, Math.round(inc.end_offset - inc.start_offset));
-        card.innerHTML = `<img src="${inc.thumb_url || ''}" alt="">
+// Groups a list of incidents (already time-sorted) into clusters: same
+// violation_type, different camera_id, created within GROUP_WINDOW_SEC of
+// the group's first member. A camera that fires twice for the same
+// violation_type close together still only joins once per group (its
+// later trigger is its own separate incident already, not a duplicate).
+function groupIncidents(list) {
+  const sorted = [...list].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const out = [];
+  for (const inc of sorted) {
+    const t = new Date(inc.created_at).getTime();
+    const openGroup = out.find(g =>
+      g.violation_type === inc.violation_type &&
+      !g.members.some(m => m.camera_id === inc.camera_id) &&
+      (t - new Date(g.members[0].created_at).getTime()) / 1000 <= GROUP_WINDOW_SEC
+    );
+    if (openGroup) openGroup.members.push(inc);
+    else out.push({ violation_type: inc.violation_type, members: [inc] });
+  }
+  return out;
+}
+
+function render() {
+  listEl.innerHTML = '';
+  const visible = incidents.filter(inc => {
+    if (listFilter === 'active') return !inc.dismissed;
+    if (listFilter === 'dismissed') return !!inc.dismissed;
+    return true;
+  });
+  groups = groupIncidents(visible);
+  if (!groups.length) { listEl.textContent = 'No incidents under this filter.'; return; }
+
+  for (const g of groups) {
+    const primary = g.members[0];
+    const card = document.createElement('div');
+    card.className = 'card' + (primary.dismissed ? ' dismissed' : '');
+    card.tabIndex = 0;
+    card.dataset.ids = g.members.map(m => m.id).join(',');
+    const dur = Math.max(1, Math.round(primary.end_offset - primary.start_offset));
+
+    const camPicker = g.members.length > 1
+      ? `<div class="cam-picker">${g.members.map((m, i) =>
+          `<button class="cam-btn${i === 0 ? ' active' : ''}" data-open="${m.id}">${m.camera_id}</button>`
+        ).join('')}</div>`
+      : '';
+
+    card.innerHTML = `<img src="${primary.thumb_url || ''}" alt="">
       <div class="row">
         <div>
-          <div class="type">${label(inc.violation_type)}</div>
-          <div class="meta">${inc.camera_id}${inc.track_id != null ? ', student ' + inc.track_id : ''}</div>
-          <div class="meta">at ${fmt(inc.start_offset)}, lasted ${dur}s, confidence ${Math.round(inc.confidence * 100)}%</div>
+          <div class="type">${label(g.violation_type)}
+            ${g.members.length > 1 ? `<span class="group-badge">${g.members.length} cameras</span>` : ''}</div>
+          <div class="meta">${primary.camera_id}${primary.track_id != null ? ', student ' + primary.track_id : ''}</div>
+          <div class="meta">at ${fmt(primary.start_offset)}, lasted ${dur}s, confidence ${Math.round(primary.confidence * 100)}%</div>
+          ${camPicker}
         </div>
-        ${inc.dismissed
-            ? '<span class="dismiss-badge">Dismissed</span>'
-            : `<button class="dismiss-btn" data-dismiss="${inc.id}">Dismiss</button>`}
+        ${primary.dismissed
+          ? '<span class="dismiss-badge">Dismissed</span>'
+          : `<button class="dismiss-btn" data-dismiss="${primary.id}">Dismiss</button>`}
       </div>`;
-        card.querySelector('img')?.addEventListener('click', () => openIncident(inc));
-        card.querySelector('.row > div')?.addEventListener('click', () => openIncident(inc));
-        card.onkeydown = e => { if (e.key === 'Enter') openIncident(inc); };
-        const dismissBtn = card.querySelector('[data-dismiss]');
-        if (dismissBtn) {
-          dismissBtn.onclick = async (e) => {
-            e.stopPropagation();
-            dismissBtn.disabled = true;
-            try {
-              await fetch(`/incidents/${inc.id}/dismiss`, { method: 'POST' });
-              inc.dismissed = 1;
-              render();
-              drawTimeline();
-            } catch (err) {
-              console.error('Dismiss failed:', err);
-              dismissBtn.disabled = false;
-            }
-          };
-        }
-        listEl.appendChild(card);
-      }
-      if (current) {
-        for (const c of listEl.children) c.setAttribute('aria-current', String(c.dataset.id == current.id));
-      }
-    }
 
-    function openIncident(inc) {
-      current = inc;
-      for (const c of listEl.children) c.setAttribute('aria-current', String(c.dataset.id == inc.id));
-      if (!inc.video_url) { note.textContent = 'This incident has no recording.'; return; }
-      note.textContent = '';
-      const seek = () => { player.currentTime = Math.max(0, inc.start_offset - LEAD_IN); player.play().catch(() => { }); };
-      if (player.src.endsWith(inc.video_url)) { seek(); }
-      else {
-        player.addEventListener('loadedmetadata', seek, { once: true });
-        player.src = inc.video_url;
-      }
-      drawTimeline();
-    }
-
-    function drawTimeline() {
-      timeline.innerHTML = '';
-      if (!current || !player.duration) return;
-      for (const inc of incidents.filter(i => i.recording === current.recording)) {
-        const m = document.createElement('button');
-        m.className = 'mark' + (inc.dismissed ? ' dismissed' : '');
-        m.title = `${label(inc.violation_type)} at ${fmt(inc.start_offset)}${inc.dismissed ? ' (dismissed)' : ''}`;
-        m.style.left = (inc.start_offset / player.duration * 100) + '%';
-        m.style.width = (Math.max(1, inc.end_offset - inc.start_offset) / player.duration * 100) + '%';
-        m.onclick = () => openIncident(inc);
-        timeline.appendChild(m);
-      }
-    }
-
-    player.addEventListener('loadedmetadata', drawTimeline);
-    player.addEventListener('error', () => {
-      note.textContent = 'This recording cannot be played yet. It may still be processing after PAUSE, or the browser may not support its codec (install ffmpeg to fix this).';
+    card.querySelector('img')?.addEventListener('click', () => openIncident(primary));
+    card.querySelector('.row > div')?.addEventListener('click', (e) => {
+      if (e.target.closest('.cam-btn')) return;
+      openIncident(primary);
     });
-    document.getElementById('refresh').onclick = load;
-    document.querySelectorAll('#filters button').forEach(btn => {
-      btn.onclick = () => {
-        document.querySelectorAll('#filters button').forEach(b => b.classList.remove('active'));
+    card.onkeydown = e => { if (e.key === 'Enter') openIncident(primary); };
+
+    card.querySelectorAll('[data-open]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const inc = g.members.find(m => String(m.id) === btn.dataset.open);
+        card.querySelectorAll('.cam-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        listFilter = btn.dataset.filter;
-        render();
+        openIncident(inc);
       };
     });
-    load();
-  </script>
-</body>
 
+    const dismissBtn = card.querySelector('[data-dismiss]');
+    if (dismissBtn) {
+      dismissBtn.onclick = async (e) => {
+        e.stopPropagation();
+        dismissBtn.disabled = true;
+        try {
+          await fetch(`/incidents/${primary.id}/dismiss`, { method: 'POST' });
+          primary.dismissed = 1;
+          render();
+          drawTimeline();
+        } catch (err) {
+          console.error('Dismiss failed:', err);
+          dismissBtn.disabled = false;
+        }
+      };
+    }
+    listEl.appendChild(card);
+  }
+  if (current) {
+    for (const c of listEl.children) {
+      c.setAttribute('aria-current', String(c.dataset.ids.split(',').includes(String(current.id))));
+    }
+  }
+}
+
+function openIncident(inc) {
+  current = inc;
+  for (const c of listEl.children) {
+    c.setAttribute('aria-current', String(c.dataset.ids.split(',').includes(String(inc.id))));
+  }
+  if (!inc.video_url) { note.textContent = 'This incident has no recording.'; return; }
+  note.textContent = '';
+  const seek = () => { player.currentTime = Math.max(0, inc.start_offset - LEAD_IN); player.play().catch(() => {}); };
+  if (player.src.endsWith(inc.video_url)) { seek(); }
+  else {
+    player.addEventListener('loadedmetadata', seek, { once: true });
+    player.src = inc.video_url;
+  }
+  drawTimeline();
+}
+
+function drawTimeline() {
+  timeline.innerHTML = '';
+  if (!current || !player.duration) return;
+  for (const inc of incidents.filter(i => i.recording === current.recording)) {
+    const m = document.createElement('button');
+    m.className = 'mark' + (inc.dismissed ? ' dismissed' : '');
+    m.title = `${label(inc.violation_type)} at ${fmt(inc.start_offset)}${inc.dismissed ? ' (dismissed)' : ''}`;
+    m.style.left = (inc.start_offset / player.duration * 100) + '%';
+    m.style.width = (Math.max(1, inc.end_offset - inc.start_offset) / player.duration * 100) + '%';
+    m.onclick = () => openIncident(inc);
+    timeline.appendChild(m);
+  }
+}
+
+player.addEventListener('loadedmetadata', drawTimeline);
+player.addEventListener('error', () => {
+  note.textContent = 'This recording cannot be played yet. It may still be processing after PAUSE, or the browser may not support its codec (install ffmpeg to fix this).';
+});
+document.getElementById('refresh').onclick = load;
+document.querySelectorAll('#filters button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('#filters button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    listFilter = btn.dataset.filter;
+    render();
+  };
+});
+load();
+</script>
+</body>
 </html>
