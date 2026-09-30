@@ -1,22 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CERBERUS AI — Exam Proctoring Dashboard</title>
-
+    
     <!-- Modern Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
-        rel="stylesheet">
-
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
     <!-- Link to static/style.css -->
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-
 <body>
 
     <!-- Header Navigation -->
@@ -30,15 +26,28 @@
         </div>
 
         <div class="header-right">
-            <div class="meta-tag">
-                <span class="meta-label">NODE:</span>
-                <span class="meta-value">ROOM_A1_MAIN</span>
+            <!-- Fix 10: per-exam sessions. Shows the current session name and
+                 lets the operator start a fresh one between exams so two
+                 exams the same day don't share recordings/incidents. -->
+            <div class="meta-tag session-tag">
+                <span class="meta-label">SESSION:</span>
+                <span class="meta-value" id="sessionIdTag">-</span>
+                <button class="tile-btn session-new-btn" onclick="promptNewSession()" title="Start a new session (requires monitoring paused)">
+                    New
+                </button>
             </div>
             <div class="meta-tag">
                 <span class="meta-label">CAMERAS:</span>
                 <span class="meta-value" id="cameraCountTag">0</span>
             </div>
             <div class="clock-display" id="clock">--:--:--</div>
+            <div class="meta-tag">
+                <span class="meta-label">USER:</span>
+                <span class="meta-value">{{ session.get('username', '-') }}</span>
+            </div>
+            <form action="/logout" method="post" style="display:inline;">
+                <button type="submit" class="tile-btn" title="Sign out">Sign out</button>
+            </form>
         </div>
     </header>
 
@@ -69,6 +78,11 @@
             </div>
 
             <div class="card stat-card">
+                <span class="card-label">Reaching / Note Passing</span>
+                <span class="stat-value" id="reachAlerts">0</span>
+            </div>
+
+            <div class="card stat-card">
                 <span class="card-label">Prolonged Side Gaze</span>
                 <span class="stat-value text-amber" id="gazeAlerts">0</span>
             </div>
@@ -80,11 +94,7 @@
             <section class="card feed-panel">
                 <div class="panel-header">
                     <div class="panel-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <circle cx="12" cy="12" r="10" />
-                            <circle cx="12" cy="12" r="3" />
-                        </svg>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
                         LIVE CAMERA TELEMETRY
                     </div>
                     <span class="tag live-tag">● LIVE</span>
@@ -104,9 +114,9 @@
 
                     <div class="manage-row add-camera-form">
                         <input type="text" id="ipCameraUrl" class="manage-input"
-                            placeholder="IP camera URL (http://...) or video file path (C:\footage.mp4)">
+                               placeholder="IP camera URL (http://...) or video file path (C:\footage.mp4)">
                         <input type="text" id="ipCameraLabel" class="manage-input manage-input-label"
-                            placeholder="Label (optional)">
+                               placeholder="Label (optional)">
                         <button class="tile-btn tile-btn-primary" onclick="addIpCamera()">+ Add</button>
                     </div>
                     <div id="addCameraStatus" class="scan-status"></div>
@@ -121,38 +131,27 @@
 
                 <div class="controls-toolbar">
                     <button class="btn btn-start start-btn" onclick="startMonitoring()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <polygon points="5 3 19 12 5 21 5 3" />
-                        </svg>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                         ARM MONITORING
                     </button>
                     <button class="btn btn-stop stop-btn" onclick="stopMonitoring()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <rect x="6" y="4" width="4" height="16" />
-                            <rect x="14" y="4" width="4" height="16" />
-                        </svg>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                         PAUSE SYSTEM
                     </button>
                     <a href="/review" target="_blank" class="btn" style="text-decoration:none;">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <polygon points="23 7 16 12 23 17 23 7" />
-                            <rect x="1" y="5" width="15" height="14" rx="2" />
-                        </svg>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
                         REVIEW RECORDINGS
                     </a>
                 </div>
 
                 <!-- Reset is separated visually from Arm/Pause since it's
                      destructive and irreversible -- deletes DB rows AND
-                     evidence photos for the whole session (all cameras). -->
+                     evidence photos for the whole session (all cameras).
+                     Fix 9: a single click here is no longer enough; the
+                     operator must type a confirmation phrase (see script.js). -->
                 <div class="danger-zone">
                     <button class="btn btn-reset" onclick="resetSession()">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                        </svg>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         RESET SESSION (Delete All Data)
                     </button>
                 </div>
@@ -162,11 +161,7 @@
             <section class="card log-panel">
                 <div class="panel-header">
                     <div class="panel-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                            <polyline points="14 2 14 8 20 8" />
-                        </svg>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                         ACTIVE AUDIT LOG
                     </div>
                     <span class="item-count" id="alertCount">0 events</span>
@@ -182,11 +177,7 @@
         <section class="card gallery-panel">
             <div class="panel-header">
                 <div class="panel-title">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="3" y="3" width="18" height="18" rx="2" />
-                        <circle cx="8.5" cy="8.5" r="1.5" />
-                        <polyline points="21 15 16 10 5 21" />
-                    </svg>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                     EVIDENCE REPOSITORY
                 </div>
                 <!-- Gallery Filter Buttons -->
@@ -194,6 +185,7 @@
                     <button class="filter-btn active" data-filter="ALL">ALL</button>
                     <button class="filter-btn" data-filter="OBJECT">DEVICES</button>
                     <button class="filter-btn" data-filter="INTERACTION">COLLAB</button>
+                    <button class="filter-btn" data-filter="REACH">REACHING</button>
                     <button class="filter-btn" data-filter="GAZE">GAZE</button>
                 </div>
             </div>
@@ -214,12 +206,9 @@
                     <h3 id="modalType">VIOLATION TYPE</h3>
                     <div class="meta-row"><span>Time:</span> <strong id="modalTime">-</strong></div>
                     <div class="meta-row"><span>Confidence:</span> <strong id="modalConf">-</strong></div>
-                    <div class="meta-row" id="modalCameraRow"><span>Camera:</span> <strong id="modalCamera">-</strong>
-                    </div>
-                    <div class="meta-row" id="modalStudentRow"><span>Student:</span> <strong
-                            id="modalStudent">-</strong></div>
-                    <a id="modalVideoLink" class="btn" href="#" target="_blank"
-                        style="display:none; text-decoration:none; margin-top:12px;">
+                    <div class="meta-row" id="modalCameraRow"><span>Camera:</span> <strong id="modalCamera">-</strong></div>
+                    <div class="meta-row" id="modalStudentRow"><span>Student:</span> <strong id="modalStudent">-</strong></div>
+                    <a id="modalVideoLink" class="btn" href="#" target="_blank" style="display:none; text-decoration:none; margin-top:12px;">
                         WATCH RECORDING
                     </a>
                 </div>
@@ -230,5 +219,4 @@
     <!-- Link to static/script.js -->
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
-
 </html>

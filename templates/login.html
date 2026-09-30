@@ -1,90 +1,36 @@
 <!doctype html>
 <html lang="en">
-
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>CERBERUS — Sign in</title>
-    <style>
-        body {
-            margin: 0;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #12141a;
-            color: #e7e9ee;
-            font: 15px/1.5 system-ui, sans-serif;
-        }
-
-        form {
-            background: #1b1f28;
-            border: 1px solid #2c3240;
-            border-radius: 10px;
-            padding: 28px 30px;
-            width: 280px;
-        }
-
-        h1 {
-            font-size: 15px;
-            letter-spacing: .08em;
-            margin: 0 0 4px;
-        }
-
-        p.sub {
-            color: #8e97a8;
-            margin: 0 0 18px;
-            font-size: 12.5px;
-        }
-
-        label {
-            display: block;
-            font-size: 12px;
-            color: #8e97a8;
-            margin-bottom: 6px;
-        }
-
-        input {
-            width: 100%;
-            box-sizing: border-box;
-            padding: 9px 10px;
-            border-radius: 6px;
-            border: 1px solid #2c3240;
-            background: #12141a;
-            color: #e7e9ee;
-            font: inherit;
-            margin-bottom: 14px;
-        }
-
-        button {
-            width: 100%;
-            padding: 9px;
-            border-radius: 6px;
-            border: 0;
-            background: #f2b134;
-            color: #12141a;
-            font: inherit;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        .error {
-            color: #ff6b6b;
-            font-size: 12.5px;
-            margin: -8px 0 14px;
-        }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERBERUS — Sign in</title>
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#12141a; color:#e7e9ee; font:15px/1.5 system-ui, sans-serif; }
+  form { background:#1b1f28; border:1px solid #2c3240; border-radius:10px; padding:28px 30px; width:280px; }
+  h1 { font-size:15px; letter-spacing:.08em; margin:0 0 4px; }
+  p.sub { color:#8e97a8; margin:0 0 18px; font-size:12.5px; }
+  label { display:block; font-size:12px; color:#8e97a8; margin-bottom:6px; }
+  input { width:100%; box-sizing:border-box; padding:9px 10px; border-radius:6px; border:1px solid #2c3240;
+          background:#12141a; color:#e7e9ee; font:inherit; margin-bottom:14px; }
+  button { width:100%; padding:9px; border-radius:6px; border:0; background:#f2b134; color:#12141a;
+           font:inherit; font-weight:600; cursor:pointer; }
+  .error { color:#ff6b6b; font-size:12.5px; margin:-8px 0 14px; }
+  .alt { text-align:center; margin-top:14px; font-size:12.5px; color:#8e97a8; }
+  .alt a { color:#f2b134; text-decoration:none; }
+</style>
 </head>
-
 <body>
-    <form method="post">
-        <h1>CERBERUS</h1>
-        <p class="sub">Exam proctoring dashboard</p>
-        {% if error %}<p class="error">{{ error }}</p>{% endif %}
-        <label for="password">Password</label>
-        <input type="password" id="password" name="password" autofocus required>
-        <button type="submit">Sign in</button>
-    </form>
+  <form method="post">
+    <h1>CERBERUS</h1>
+    <p class="sub">Exam proctoring dashboard</p>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <p class="alt">No account yet? <a href="/signup">Sign up</a></p>
+  </form>
 </body>
-
 </html>

@@ -18,12 +18,14 @@ from database import init_db, log_violation, get_recent_violations, clear_violat
 from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        list_incidents, clear_incidents, dismiss_incident,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
+from auth import init_auth_db, create_user, verify_user
 
 app = Flask(__name__)
 
 # Initialize SQLite database schema
 init_db()
 init_incident_db()
+init_auth_db()
 
 # Fix 7: finalize any recordings a previous crash / power loss left half-written,
 # so they're playable in /review instead of permanently stuck at "processing".
@@ -105,6 +107,21 @@ CAMERA_BUMP_COOLDOWN_SEC = 5.0   # don't re-trigger every frame while still sett
 # this on its own.)
 TRACK_MIN_AGE_SEC = 1.0
 
+# --- NOTE-PASSING / REACHING DETECTION ---
+# Wrist keypoints (K9 left, K10 right) let the system catch a hand crossing
+# into a neighbor's space -- passing or receiving a note, reaching into an
+# adjacent desk -- even when the two torsos aren't close enough to trip the
+# general interaction check above (that check uses shoulder-to-shoulder
+# proximity and spine tilt; this one uses wrist-to-neighbor-shoulder
+# distance instead, so it catches an outstretched arm that doesn't bring
+# the whole torso along). Like interaction, only established tracks
+# participate (Fix 6) and a crossing must be HELD for
+# REACH_DURATION_THRESHOLD, so a normal gesture that briefly swings past a
+# neighbor doesn't false-flag. Known limitation: only the reaching
+# student's track_id is attributed, not the recipient.
+REACH_ZONE_RADIUS_MULTIPLIER = 1.3   # neighbor's "personal zone" radius, x their shoulder width
+REACH_DURATION_THRESHOLD    = 1.0    # seconds a wrist must stay inside that zone
+
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
 # ==========================================
@@ -164,6 +181,7 @@ def add_camera(source, cam_type, label=None):
         "gaze_timers":        {},
         "turn_history":       {},
         "interaction_timers": {},
+        "reach_timers":       {},   # (reacher_id, target_id) -> time wrist first entered target's zone
         "recorder":  SessionRecorder(CURRENT_SESSION, cam_id),
         "incidents": IncidentTracker(),
         # --- adaptive baseline state, per track_id ---
@@ -253,6 +271,7 @@ def pause_camera(cam_id):
         entry["gaze_timers"].clear()
         entry["turn_history"].clear()
         entry["interaction_timers"].clear()
+        entry["reach_timers"].clear()
         entry["baseline_ratio"].clear()
         entry["calibration_start"].clear()
         entry["stable_since"].clear()
@@ -466,6 +485,7 @@ def _detection_loop(camera_id):
             gaze_timers      = entry["gaze_timers"]
             turn_history     = entry["turn_history"]
             pair_timers      = entry["interaction_timers"]
+            reach_timers     = entry["reach_timers"]
             baseline_ratio   = entry["baseline_ratio"]
             calib_start      = entry["calibration_start"]
             stable_since     = entry["stable_since"]
@@ -479,6 +499,7 @@ def _detection_loop(camera_id):
                 gaze_timers.clear()
                 turn_history.clear()
                 pair_timers.clear()
+                reach_timers.clear()
                 baseline_ratio.clear()
                 calib_start.clear()
                 stable_since.clear()
@@ -495,6 +516,7 @@ def _detection_loop(camera_id):
 
             object_violation      = False
             interaction_violation = False
+            reach_violation       = False
             gaze_trigger          = False
             violation_reason      = ""
             violation_confidence  = 0.0
@@ -604,12 +626,22 @@ def _detection_loop(camera_id):
                                           (l_hip[1] + r_hip[1]) / 2)
                             spine_tilt = calculate_angle(hip_center, shoulder_center)
 
+                        # Wrist points for the note-passing / reach check below.
+                        # None when that wrist isn't confidently visible (e.g.
+                        # under the desk) rather than a guessed position.
+                        l_wrist_pt = ((int(l_wrist[0]), int(l_wrist[1]))
+                                     if (c_lwrist >= MIN_KEYPOINT_CONF and l_wrist[0] > 0) else None)
+                        r_wrist_pt = ((int(r_wrist[0]), int(r_wrist[1]))
+                                     if (c_rwrist >= MIN_KEYPOINT_CONF and r_wrist[0] > 0) else None)
+
                         students.append({
                             "track_id":        track_id,
                             "shoulder_center": shoulder_center,
                             "shoulder_width":  shoulder_width,
                             "spine_tilt":      spine_tilt,
                             "nose":            nose,
+                            "l_wrist":         l_wrist_pt,
+                            "r_wrist":         r_wrist_pt,
                             "person_turn":     "FORWARD",   # filled in below
                         })
 
@@ -862,6 +894,7 @@ def _detection_loop(camera_id):
             # up with a real student and start an interaction timer.
             interaction_candidates = [s for s in students if s["track_id"] in established_ids]
             active_pairs = []
+            active_reach_pairs = []
             num_students = len(interaction_candidates)
             for i in range(num_students):
                 for j in range(i + 1, num_students):
@@ -904,8 +937,48 @@ def _detection_loop(camera_id):
                     else:
                         pair_timers.pop(pair_key, None)
 
+                    # --- Note-passing / reach check (independent of overall
+                    # torso proximity above -- two desks can sit at a normal
+                    # distance while an arm still crosses into the neighbor's
+                    # zone). Checked in both directions since either student
+                    # could be the one reaching. ---
+                    for reacher, target in ((s1, s2), (s2, s1)):
+                        reach_key = (reacher["track_id"], target["track_id"])
+                        reach_wrist = None
+                        for wrist in (reacher["l_wrist"], reacher["r_wrist"]):
+                            if wrist is None:
+                                continue
+                            wd = math.hypot(wrist[0] - target["shoulder_center"][0],
+                                            wrist[1] - target["shoulder_center"][1])
+                            if wd < target["shoulder_width"] * REACH_ZONE_RADIUS_MULTIPLIER:
+                                reach_wrist = wrist
+                                break
+
+                        if reach_wrist is not None:
+                            active_reach_pairs.append(reach_key)
+                            if reach_key not in reach_timers:
+                                reach_timers[reach_key] = current_time
+                            r_elapsed = current_time - reach_timers[reach_key]
+
+                            if r_elapsed >= REACH_DURATION_THRESHOLD:
+                                reach_violation = True
+                                if not violation_reason:
+                                    violation_reason     = "REACHING_NEIGHBOR_ZONE"
+                                    violation_confidence = 0.85
+                                    violating_track_id   = reacher["track_id"]
+
+                                cv2.line(frame, reach_wrist, target["shoulder_center"],
+                                         (0, 140, 255), 2)
+                                cv2.putText(frame, "REACH",
+                                            (reach_wrist[0] - 20, max(20, reach_wrist[1] - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2)
+                        else:
+                            reach_timers.pop(reach_key, None)
+
             entry["interaction_timers"] = {k: v for k, v in pair_timers.items()
                                            if k in active_pairs}
+            entry["reach_timers"] = {k: v for k, v in reach_timers.items()
+                                     if k in active_reach_pairs}
 
             # ==========================================
             # 5. HUD / DASHBOARD STATUS OVERLAY
@@ -918,6 +991,9 @@ def _detection_loop(camera_id):
                 status_color = (0, 0, 255)
             elif interaction_violation:
                 status_text  = "ALERT: STUDENTS INTERACTING!"
+                status_color = (0, 0, 255)
+            elif reach_violation:
+                status_text  = "ALERT: SUSPECTED NOTE PASSING!"
                 status_color = (0, 0, 255)
             elif gaze_trigger:
                 status_text  = "ALERT: PROLONGED SIDE GAZE!"
@@ -934,7 +1010,7 @@ def _detection_loop(camera_id):
             # ==========================================
             entry["recorder"].write(frame)
 
-            is_violating = object_violation or interaction_violation or gaze_trigger
+            is_violating = object_violation or interaction_violation or reach_violation or gaze_trigger
 
             if is_violating:
                 inc, is_new = entry["incidents"].observe(
@@ -995,31 +1071,27 @@ def generate_frames(camera_id):
 
 
 # ==========================================
-# ACCESS CONTROL (Fix 8)
+# ACCESS CONTROL (Fix 8, upgraded to named accounts)
 # ==========================================
 # The app used to bind to 0.0.0.0 with no auth -- anyone on the classroom
 # Wi-Fi could open the dashboard, watch every camera, or hit Reset Session.
-# A single shared password is enough for a class demo; it isn't meant to
-# replace per-user accounts. Set CERBERUS_PASSWORD yourself before running
-# for a real exam -- otherwise a random one is generated and printed to the
-# console each time the app starts (so it changes on every restart).
-APP_PASSWORD = os.environ.get("CERBERUS_PASSWORD")
-if not APP_PASSWORD:
-    APP_PASSWORD = secrets.token_urlsafe(9)
-    print("=" * 64)
-    print(f"  CERBERUS password for this run: {APP_PASSWORD}")
-    print("  (set the CERBERUS_PASSWORD environment variable to fix it)")
-    print("=" * 64)
-app.secret_key = secrets.token_hex(32)   # session cookies invalidate on restart -- fine for this use
+# This started as one shared password; it's now per-user accounts (see
+# auth.py): hashed, salted passwords, and actions below can be attributed
+# to whoever is signed in instead of "whoever has the password". A
+# persistent CERBERUS_SECRET_KEY is optional -- without one, a new random
+# key is generated each run and everyone is signed out on restart, which
+# is a reasonable default; set it if you'd rather sessions survive a
+# restart.
+app.secret_key = os.environ.get("CERBERUS_SECRET_KEY") or secrets.token_hex(32)
 
-PUBLIC_ENDPOINTS = {"login"}
+PUBLIC_ENDPOINTS = {"login", "signup"}
 
 
 @app.before_request
 def _require_login():
     if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
         return
-    if not session.get("authed"):
+    if not session.get("user_id"):
         return redirect(url_for("login"))
 
 
@@ -1027,16 +1099,36 @@ def _require_login():
 def login():
     error = None
     if request.method == 'POST':
-        if request.form.get('password') == APP_PASSWORD:
-            session['authed'] = True
+        user = verify_user(request.form.get('username', ''), request.form.get('password', ''))
+        if user:
+            session['user_id']  = user['id']
+            session['username'] = user['username']
             return redirect(url_for('index'))
-        error = "Incorrect password."
+        error = "Incorrect username or password."
     return render_template('login.html', error=error)
+
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    error = None
+    if request.method == 'POST':
+        uid, error = create_user(
+            request.form.get('username', ''),
+            request.form.get('password', ''),
+            request.form.get('invite_code', ''),
+        )
+        if uid:
+            user = verify_user(request.form.get('username', ''), request.form.get('password', ''))
+            session['user_id']  = user['id']
+            session['username'] = user['username']
+            return redirect(url_for('index'))
+    return render_template('signup.html', error=error)
 
 
 @app.route('/logout', methods=['POST'])
 def logout():
-    session.pop('authed', None)
+    session.pop('user_id', None)
+    session.pop('username', None)
     return redirect(url_for('login'))
 
 
@@ -1199,6 +1291,8 @@ def reset_session():
             "message": f'Type "{RESET_CONFIRM_PHRASE}" to confirm this cannot be undone.',
         }), 400
 
+    print(f"[session] {session.get('username', 'unknown')} reset session '{CURRENT_SESSION}'")
+
     for _entry in list(camera_registry.values()):
         _finish_recording(_entry)
 
@@ -1215,6 +1309,7 @@ def reset_session():
         entry["gaze_timers"].clear()
         entry["turn_history"].clear()
         entry["interaction_timers"].clear()
+        entry["reach_timers"].clear()
         entry["baseline_ratio"].clear()
         entry["calibration_start"].clear()
         entry["stable_since"].clear()
@@ -1290,6 +1385,7 @@ def dismiss_incident_route(inc_id):
     glitch, a passing proctor, a misfire) without deleting the underlying
     evidence -- the incident stays in the record, just tagged dismissed."""
     dismiss_incident(inc_id, True)
+    print(f"[incidents] {session.get('username', 'unknown')} dismissed incident #{inc_id}")
     return jsonify({"status": "dismissed", "id": inc_id})
 
 
@@ -1307,11 +1403,13 @@ def system_stats():
         print(f"[DB ERROR in system_stats]: {e}")
         records = []
 
-    phone_count = interaction_count = gaze_count = 0
+    phone_count = interaction_count = reach_count = gaze_count = 0
     for r in records:
         v_type = str(r.get('violation_type', '')).upper()
         if "OBJECT" in v_type or "PHONE" in v_type or "WATCH" in v_type:
             phone_count += 1
+        elif "REACH" in v_type:
+            reach_count += 1
         elif "INTERACTION" in v_type:
             interaction_count += 1
         elif "GAZE" in v_type:
@@ -1322,6 +1420,7 @@ def system_stats():
         "total_violations": len(records),
         "phone":            phone_count,
         "interaction":      interaction_count,
+        "reach":            reach_count,
         "gaze":             gaze_count,
         "session_id":       CURRENT_SESSION,
     })
