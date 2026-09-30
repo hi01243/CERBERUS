@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CERBERUS — Sign in</title>
+<title>CERBERUS - Sign in</title>
 <style>
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
          background:#12141a; color:#e7e9ee; font:15px/1.5 system-ui, sans-serif; }
@@ -25,11 +25,19 @@
     <h1>CERBERUS</h1>
     <p class="sub">Exam proctoring dashboard</p>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
-    <label for="username">Username</label>
-    <input type="text" id="username" name="username" autocomplete="username" autofocus required>
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" autocomplete="current-password" required>
-    <button type="submit">Sign in</button>
+    {% if verification_username %}
+      <p class="sub">Enter the current code from your authenticator app.</p>
+      <input type="hidden" name="step" value="verify">
+      <label for="code">Authenticator code</label>
+      <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" autofocus required>
+      <button type="submit">Verify and sign in</button>
+    {% else %}
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    {% endif %}
     <p class="alt">No account yet? <a href="/signup">Sign up</a></p>
   </form>
 </body>

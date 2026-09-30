@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERBERUS - Authenticator sign-in</title>
+<style>
+  :root { --bg:#12141a; --panel:#1b1f28; --line:#2c3240; --text:#e7e9ee; --muted:#8e97a8; --accent:#f2b134; --error:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { min-height:100vh; margin:0; display:grid; place-items:center; padding:20px; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,sans-serif; }
+  main { width:min(100%,440px); padding:28px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  h1 { margin:0 0 8px; font-size:19px; }
+  p { color:var(--muted); }
+  .secret { display:block; margin:18px 0; padding:14px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--accent); font:500 16px/1.5 ui-monospace,monospace; overflow-wrap:anywhere; user-select:all; }
+  label { display:block; margin:18px 0 6px; color:var(--muted); font-size:12px; }
+  input { width:100%; padding:10px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--text); font:inherit; }
+  button,.link { display:inline-flex; align-items:center; justify-content:center; margin-top:14px; padding:9px 14px; border:1px solid var(--accent); border-radius:5px; background:var(--accent); color:#12141a; font:600 14px system-ui,sans-serif; text-decoration:none; cursor:pointer; }
+  .secondary { border-color:var(--line); background:transparent; color:var(--text); }
+  .error { color:var(--error); }
+  a.back { display:block; margin-top:18px; color:var(--accent); text-decoration:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Authenticator sign-in</h1>
+  {% if enabled %}
+    <p>Authenticator MFA is enabled. Sign in with your username, password, and an app code. Session deletion also requires an app code.</p>
+    <button id="disable-mfa" class="secondary" type="button">Disable authenticator MFA</button>
+  {% else %}
+    <p>Add CERBERUS to an authenticator app using this setup key, then enter the current six-digit code to enable sign-in MFA and protect session deletion.</p>
+    <code class="secret">{{ secret }}</code>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post">
+      <label for="code">Authenticator code</label>
+      <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required autofocus>
+      <button type="submit">Verify and enable</button>
+    </form>
+  {% endif %}
+  <a class="back" href="/">Back to sessions</a>
+</main>
+{% if enabled %}
+<script>
+document.getElementById('disable-mfa').addEventListener('click', async () => {
+  const button = document.getElementById('disable-mfa');
+  const code = prompt('Enter the current six-digit code from your authenticator app:');
+  if (!code) return;
+  button.disabled = true;
+  try {
+    const disabled = await fetch('/security/mfa/disable', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code.trim() })
+    });
+    const data = await disabled.json();
+    if (!disabled.ok) throw new Error(data.message || 'Could not switch sign-in method.');
+    location.reload();
+  } catch (error) {
+    alert(error.message);
+    button.disabled = false;
+  }
+});
+</script>
+{% endif %}
+</body>
+</html>

@@ -229,6 +229,11 @@ def list_incidents(session_id):
     return _q("SELECT * FROM incidents WHERE session_id=? ORDER BY id DESC", (session_id,), fetch=True)
 
 
+def list_incident_sessions():
+    return _q("SELECT session_id, COUNT(*) AS flag_count, MAX(created_at) AS updated_at "
+              "FROM incidents GROUP BY session_id", fetch=True)
+
+
 def clear_incidents(session_id):
     _q("DELETE FROM incidents WHERE session_id=?", (session_id,))
 
