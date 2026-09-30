@@ -20,6 +20,9 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
 from auth import init_auth_db, create_user, verify_user
 
+BUILD_ID = "2026-09-30-r6-lower-yaw-thr-gaze-grace"
+print(f"[cerberus] app.py build {BUILD_ID}")
+
 app = Flask(__name__)
 
 # Initialize SQLite database schema
@@ -27,7 +30,7 @@ init_db()
 init_incident_db()
 init_auth_db()
 
-# Fix 7: finalize any recordings a previous crash / power loss left half-written,
+# Finalize any recordings a previous crash / power loss left half-written,
 # so they're playable in /review instead of permanently stuck at "processing".
 cleanup_orphaned_recordings()
 
@@ -42,9 +45,7 @@ monitoring_active = False   # session-wide arm/disarm (the ARM/PAUSE buttons)
 # NOTE: all thresholds below are hand-calibrated, not learned. Before demo
 # day, run a real test session with people seated at actual exam spacing
 # and adjust these against what you observe -- don't trust them untested.
-HEAD_TURN_RATIO_THRESHOLD = 0.6   # see the long comment at the calculation
-                                    # site -- this is a horizontal nose-
-                                    # displacement ratio, not a raw angle
+HEAD_TURN_RATIO_THRESHOLD = 0.45  # horizontal nose-displacement ratio, not a raw angle
 GAZE_DURATION_THRESHOLD = 3.0
 SPINE_TILT_THRESHOLD_DEG = 25.0
 PROXIMITY_MULTIPLIER = 1.8
@@ -53,92 +54,99 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SMOOTHING_WINDOW = 5
 
+# --- POSE MODEL INFERENCE SETTINGS ---
+# A higher NMS IoU / confidence cuts down on the model emitting two
+# overlapping skeletons for one person (the root cause of "ghost" students).
+POSE_IOU  = 0.5
+POSE_CONF = 0.4
+
+# --- DUPLICATE-SKELETON (GHOST TRACK) FILTER ---
+# Two skeletons whose shoulder centers sit closer than this fraction of
+# their shoulder width cannot be two different seated people -- it's one
+# person detected twice.  The older / higher-confidence one is kept.
+# Without this, a ghost paired with its real twin reads as "shoulder
+# distance ~0" and trips STUDENT_INTERACTION and REACHING_NEIGHBOR_ZONE.
+DUPLICATE_DIST_MULTIPLIER = 0.8
+
 # --- ADAPTIVE "NORMAL POSITION" BASELINE ---
-# These control the per-student gaze baseline: what counts as "forward"
-# for THIS student, which can slowly drift if they hold a new, moderate
-# position steadily (e.g. shifted their chair). Also hand-calibrated --
-# validate against a real test session before demo day.
 CALIBRATION_DURATION = 2.0          # seconds to sample a student's initial "neutral" pose
 BASELINE_ADAPT_RATE = 0.02          # how fast the baseline creeps toward a newly-held position
 REPOSITION_STABILITY_WINDOW = 10.0  # student must hold a new position this long before baseline shifts
 REPOSITION_JUMP_LIMIT = HEAD_TURN_RATIO_THRESHOLD * 0.8
 REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 
-# --- SMARTWATCH / WALL-CLOCK FILTER (Fix 1) ---
+# --- SMARTWATCH / WALL-CLOCK FILTER ---
 # YOLO class 74 ("clock") fires on both smartwatches AND wall clocks.
-# Two guards are applied before a clock detection is counted as a violation:
-#
-#   A. Static guard: track each clock bbox centre across frames.  If it has
-#      not moved more than STATIC_CLOCK_MOVE_PX pixels in STATIC_CLOCK_SEC
-#      seconds it is almost certainly a wall clock -> suppress.  Suppressed
-#      detections are drawn as a dim grey box so the operator can confirm
-#      the filter is working.
-#
-#   B. Wrist guard: if at least one student is tracked by pose, a clock
-#      detection must be within WRIST_PROXIMITY_PX pixels of a visible wrist
-#      keypoint.  If no wrists are visible (hands under the desk) we stay
-#      conservative and do NOT suppress.
-#
-# Cell-phone detections (class 67) bypass both guards entirely.
-STATIC_CLOCK_SEC       = 8.0   # suppress after this many seconds without moving
-STATIC_CLOCK_RADIUS_PX = 60    # detections within this radius = same object
-STATIC_CLOCK_MOVE_PX   = 35    # must move at least this far to reset the static timer
-WRIST_PROXIMITY_PX     = 150   # max distance (px) from any wrist keypoint to count as worn
+#   A. Static guard: a clock that hasn't moved in STATIC_CLOCK_SEC is a wall clock.
+#   B. Wrist guard: a clock must be near a visible wrist to count as worn.
+# Cell-phone detections (class 67) bypass both guards.
+STATIC_CLOCK_SEC       = 8.0
+STATIC_CLOCK_RADIUS_PX = 60
+STATIC_CLOCK_MOVE_PX   = 35
+WRIST_PROXIMITY_PX     = 150
 
-# --- CAMERA-BUMP DETECTION (Fix 5) ---
-# If the camera gets knocked, every student's head-turn baseline is now
-# measuring the wrong thing, and everyone false-flags for "looking away" at
-# once. If a large fraction of currently-visible, already-calibrated
-# students all read as turned in the SAME frame, treat it as a probable
-# camera disturbance rather than a coordinated multi-student violation:
-# drop their calibration so the existing CALIBRATING flow silently
-# reseeds each baseline, instead of raising a wall of false alerts.
-CAMERA_BUMP_RATIO        = 0.6   # fraction of visible students turned at once
-CAMERA_BUMP_MIN_STUDENTS = 3     # don't fire this on 1-2 people (e.g. solo testing)
-CAMERA_BUMP_COOLDOWN_SEC = 5.0   # don't re-trigger every frame while still settling
+# --- CAMERA-BUMP DETECTION ---
+CAMERA_BUMP_RATIO        = 0.6
+CAMERA_BUMP_MIN_STUDENTS = 3
+CAMERA_BUMP_COOLDOWN_SEC = 5.0
 
-# --- TRACK-AGE GATE (Fix 6) ---
-# A track that has only existed for a moment is more likely to be a
-# passing proctor, a brief occlusion-driven ID swap, or a tracking glitch
-# than a genuine student behavior. Object attribution and interaction
-# checks ignore tracks younger than this. (Gaze detection is left as-is:
-# it already requires CALIBRATION_DURATION + GAZE_DURATION_THRESHOLD of
-# continuous tracking before it can fire, which is a stronger gate than
-# this on its own.)
+# --- TRACK-AGE GATE ---
 TRACK_MIN_AGE_SEC = 1.0
 
 # --- NOTE-PASSING / REACHING DETECTION ---
-# Wrist keypoints (K9 left, K10 right) let the system catch a hand crossing
-# into a neighbor's space -- passing or receiving a note, reaching into an
-# adjacent desk -- even when the two torsos aren't close enough to trip the
-# general interaction check above (that check uses shoulder-to-shoulder
-# proximity and spine tilt; this one uses wrist-to-neighbor-shoulder
-# distance instead, so it catches an outstretched arm that doesn't bring
-# the whole torso along). Like interaction, only established tracks
-# participate (Fix 6) and a crossing must be HELD for
-# REACH_DURATION_THRESHOLD, so a normal gesture that briefly swings past a
-# neighbor doesn't false-flag. Known limitation: only the reaching
-# student's track_id is attributed, not the recipient.
-REACH_ZONE_RADIUS_MULTIPLIER = 1.3   # neighbor's "personal zone" radius, x their shoulder width
-REACH_DURATION_THRESHOLD    = 1.0    # seconds a wrist must stay inside that zone
+# A hand-off is detected two ways (either one counts):
+#   A. ZONE:      a wrist enters a circle around the neighbor's shoulder
+#                 center (REACH_ZONE_RADIUS_MULTIPLIER x their shoulder width).
+#   B. EXTENSION: the arm is stretched out (wrist farther than
+#                 REACH_EXTENSION_MULTIPLIER x own shoulder width from own
+#                 shoulders) AND the wrist has travelled at least
+#                 REACH_PROGRESS_MIN of the way toward the neighbor.  This
+#                 is what catches a paper being passed across an aisle,
+#                 where the hand never gets near the neighbor's chest.
+# B only applies to students in roughly the same row, so a person merely
+# stretching in front of / behind another isn't paired with them.
+REACH_ZONE_RADIUS_MULTIPLIER    = 1.5
+REACH_EXTENSION_MULTIPLIER      = 1.6
+REACH_PROGRESS_MIN              = 0.35
+REACH_SAME_ROW_MULTIPLIER       = 2.0    # max vertical offset between shoulder centers, x avg shoulder width
+REACH_MAX_PAIR_DIST_MULTIPLIER  = 8.0    # generous: the extension test does the real filtering
+REACH_DURATION_THRESHOLD        = 0.5
+REACH_GRACE_SEC                 = 0.4    # tolerate a dropped wrist keypoint for this long
+REACH_WRIST_CONF                = 0.3    # wrists are blurry mid-motion; accept lower confidence
+
+# --- HEAD-POSE ROBUSTNESS ---
+# Looking DOWN at a paper shifts the nose sideways relative to the shoulder
+# line and used to read as "looking left/right".  We now also track how far
+# the nose sits above the shoulder line (normalised by shoulder width); if it
+# has dropped by more than PITCH_DOWN_DELTA versus this student's baseline,
+# a sideways reading is classified LOOKING DOWN and ignored.
+PITCH_DOWN_DELTA = 0.30
+# A very large sideways reading is a real turn no matter what the pitch says.
+# Twisting / leaning tilts the shoulder line and inflates the pitch number, so
+# without this override a genuine turn (yaw ~ -1.3 in testing) was being
+# excused as "looking down".  Only MODERATE readings can be excused.
+HEAD_TURN_STRONG_RATIO = 1.0
+# A gaze timer survives a dip below threshold this long (a blink, one noisy
+# frame) instead of restarting from zero.
+GAZE_GRACE_SEC = 0.8
+# If a student stays "flagged" this long, it is a held posture (leaning over
+# to write, shifted chair) rather than a glance: the incident was already
+# logged at GAZE_DURATION_THRESHOLD, so re-baseline to stop the endless alert.
+GAZE_REBASELINE_SEC = 8.0
+# Per-track state is kept this long after a track disappears, so a single
+# missed frame doesn't wipe a student's baseline and restart calibration.
+TRACK_LOST_GRACE_SEC = 1.5
+# Draws yaw / pitch numbers by each student so thresholds can be tuned by eye.
+DEBUG_OVERLAY = True
 
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
 # ==========================================
-# Architecture (post background-thread refactor, Fix 3):
-#   activate_camera()  -> opens cap, loads models, starts _detection_loop()
-#                         as a daemon thread for this camera.
-#   _detection_loop()  -> reads frames, runs YOLO, records, logs incidents.
-#                         Stores latest annotated JPEG in entry["latest_frame"].
-#   generate_frames()  -> trivial MJPEG streamer: just yields latest_frame.
-#                         No YOLO, no recording.  Multiple browser tabs can
-#                         connect simultaneously without fighting over frames
-#                         or scrambling track IDs.
-#   pause_camera()     -> sets stop_event, joins thread, releases cap.
-#   remove_camera()    -> same, then drops entry from registry.
-#
-# registry_lock guards dict structure changes (add/remove entries).
-# Each entry has its own lock for the brief cap.read() critical section.
+# activate_camera()  -> opens cap, loads models, starts _detection_loop() thread.
+# _detection_loop()  -> reads frames, runs YOLO, records, logs incidents.
+# generate_frames()  -> trivial MJPEG streamer yielding entry["latest_frame"].
+# pause_camera()     -> stop_event, join, release cap.
+# remove_camera()    -> same, then drops entry from registry.
 camera_registry = {}
 registry_lock = threading.Lock()
 _next_camera_num = 1
@@ -163,15 +171,14 @@ def _finish_recording(entry):
 
 def add_camera(source, cam_type, label=None):
     """Registers a camera as INACTIVE.  Does not open the device or load
-    models -- that happens on activate_camera(), so registering many cameras
-    stays cheap.
+    models -- that happens on activate_camera().
 
     cam_type: "local" (device-index int) | "ip" (URL str) | "file" (path str)
     """
     cam_id = _generate_camera_id()
     entry = {
         "source":   source,
-        "type":     cam_type,          # "local" | "ip" | "file"
+        "type":     cam_type,
         "label":    label or cam_id,
         "status":   "inactive",        # "inactive" | "active" | "paused"
         "cap":      None,
@@ -181,7 +188,7 @@ def add_camera(source, cam_type, label=None):
         "gaze_timers":        {},
         "turn_history":       {},
         "interaction_timers": {},
-        "reach_timers":       {},   # (reacher_id, target_id) -> time wrist first entered target's zone
+        "reach_timers":       {},
         "recorder":  SessionRecorder(CURRENT_SESSION, cam_id),
         "incidents": IncidentTracker(),
         # --- adaptive baseline state, per track_id ---
@@ -189,16 +196,22 @@ def add_camera(source, cam_type, label=None):
         "calibration_start": {},
         "stable_since":      {},
         "stable_anchor":     {},
-        # --- background detection thread (Fix 3) ---
-        "latest_frame": None,           # bytes: latest annotated JPEG for the HTTP stream
+        # --- background detection thread ---
+        "latest_frame": None,
         "stop_event":   threading.Event(),
         "thread":       None,
-        # --- smartwatch static-position tracker (Fix 1) ---
-        "static_objects": {},           # {int_id: {center, static_since, last_seen}}
-        # --- camera-bump detection (Fix 5) ---
+        # --- smartwatch static-position tracker ---
+        "static_objects": {},
+        # --- camera-bump detection ---
         "last_bump_time": 0.0,
-        # --- track-age gate (Fix 6) ---
-        "track_first_seen": {},         # track_id -> time first seen
+        # --- track-age gate ---
+        "track_first_seen": {},
+        "track_last_seen":  {},
+        # --- head-pose baseline extras ---
+        "calib_samples":   {},
+        "baseline_height": {},
+        "pitch_history":   {},
+        "gaze_lost":       {},
     }
     with registry_lock:
         camera_registry[cam_id] = entry
@@ -207,16 +220,11 @@ def add_camera(source, cam_type, label=None):
 
 def activate_camera(cam_id):
     """Opens the capture device (if not already open), loads models (if not
-    cached), then starts the per-camera detection thread.
-
-    Paused cameras keep their models cached, so resuming skips the slow
-    model-load step and only reopens the device + relaunches the thread.
-    """
+    cached), then starts the per-camera detection thread."""
     entry = camera_registry.get(cam_id)
     if entry is None:
         return False, "Camera not found"
 
-    # Guard: do not spawn a second thread if one is already running.
     if entry.get("thread") and entry["thread"].is_alive():
         return True, "already active"
 
@@ -225,8 +233,6 @@ def activate_camera(cam_id):
             cap = cv2.VideoCapture(entry["source"])
             if not cap.isOpened():
                 return False, f"Could not open camera source: {entry['source']}"
-            # Minimise the internal buffer for live cameras so the feed stays
-            # current.  Video files are sequential -- leave their buffer alone.
             if entry["type"] != "file":
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             entry["cap"] = cap
@@ -246,16 +252,24 @@ def activate_camera(cam_id):
     return True, "activated"
 
 
+PER_TRACK_KEYS = ("gaze_timers", "turn_history", "baseline_ratio", "calibration_start",
+                  "stable_since", "stable_anchor", "track_first_seen", "track_last_seen",
+                  "calib_samples", "baseline_height", "pitch_history", "gaze_lost")
+
+
+def _clear_tracking_state(entry):
+    """Wipes every per-track dict on a camera entry."""
+    for key in PER_TRACK_KEYS + ("interaction_timers", "reach_timers", "static_objects"):
+        entry[key].clear()
+
+
 def pause_camera(cam_id):
-    """Signals the detection thread to stop, waits for it to exit (recording
-    is finalised in the thread's finally-block), then releases the capture
-    device.  Models stay cached in memory so a later resume is fast.
-    """
+    """Stops the detection thread, releases the capture device.  Models stay
+    cached so a later resume is fast."""
     entry = camera_registry.get(cam_id)
     if entry is None:
         return False, "Camera not found"
 
-    # Signal, then join with a generous timeout for any in-flight YOLO call.
     entry["stop_event"].set()
     t = entry.get("thread")
     if t and t.is_alive():
@@ -268,24 +282,14 @@ def pause_camera(cam_id):
             entry["cap"] = None
         entry["status"] = "paused"
         entry["latest_frame"] = None
-        entry["gaze_timers"].clear()
-        entry["turn_history"].clear()
-        entry["interaction_timers"].clear()
-        entry["reach_timers"].clear()
-        entry["baseline_ratio"].clear()
-        entry["calibration_start"].clear()
-        entry["stable_since"].clear()
-        entry["stable_anchor"].clear()
-        entry["static_objects"].clear()
-        entry["track_first_seen"].clear()
+        _clear_tracking_state(entry)
 
     return True, "paused"
 
 
 def remove_camera(cam_id):
-    """Stops the detection thread, releases the device, finalises the
-    recording, and drops the camera from the registry.
-    """
+    """Stops the thread, releases the device, finalises the recording, and
+    drops the camera from the registry."""
     entry = camera_registry.get(cam_id)
     if entry is None:
         return False, "Camera not found"
@@ -299,7 +303,7 @@ def remove_camera(cam_id):
         if entry["cap"] is not None:
             entry["cap"].release()
 
-    _finish_recording(entry)   # thread finally-block also calls this; second call is a no-op
+    _finish_recording(entry)
 
     with registry_lock:
         camera_registry.pop(cam_id, None)
@@ -308,10 +312,7 @@ def remove_camera(cam_id):
 
 
 def scan_local_cameras(max_index=4):
-    """Probes local device indices for available cameras not already
-    registered.  Blocking (a few seconds) -- triggered by an explicit
-    'Scan' button, not polled automatically.
-    """
+    """Probes local device indices for available cameras not already registered."""
     registered_local_sources = {
         entry["source"] for entry in camera_registry.values()
         if entry["type"] == "local"
@@ -327,8 +328,7 @@ def scan_local_cameras(max_index=4):
     return found
 
 
-# --- Pre-register one default local camera so the dashboard is not empty on
-# first load. It does NOT auto-start -- click "Use" on it. ---
+# Pre-register one default local camera so the dashboard is not empty.
 add_camera(0, "local", label="cam1")
 
 
@@ -354,23 +354,79 @@ def make_status_frame(label, message, sub_message=""):
 
 
 # ==========================================
-# SMARTWATCH STATIC-POSITION TRACKER (Fix 1, Guard A)
+# DUPLICATE-SKELETON FILTER
+# ==========================================
+def _select_unique_people(candidates, track_first_seen, current_time):
+    """Given pre-pass candidates (dicts with idx, track_id, center, width,
+    conf), drop ghost skeletons: any candidate whose shoulder center falls
+    within DUPLICATE_DIST_MULTIPLIER x shoulder width of an already-kept one.
+
+    Priority: older track first (stable ID), then higher keypoint confidence.
+    Returns the set of kept `idx` values.
+    """
+    ordered = sorted(
+        candidates,
+        key=lambda c: (track_first_seen.get(c["track_id"], current_time), -c["conf"])
+    )
+    kept = []
+    for c in ordered:
+        is_dup = False
+        for k in kept:
+            d = math.hypot(c["center"][0] - k["center"][0],
+                           c["center"][1] - k["center"][1])
+            limit = min(c["width"], k["width"]) * DUPLICATE_DIST_MULTIPLIER
+            if d < limit:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(c)
+    return {c["idx"] for c in kept}
+
+
+# ==========================================
+# NOTE-PASSING / REACH TEST
+# ==========================================
+def _find_reaching_wrist(reacher, target, same_row):
+    """Returns the wrist (x, y) of `reacher` that is reaching toward `target`,
+    or None.  See the REACH_* constants for the two tests."""
+    rx, ry = reacher["shoulder_center"]
+    tx, ty = target["shoulder_center"]
+    sw     = reacher["shoulder_width"]
+    gap_x  = tx - rx
+
+    for wrist in (reacher["l_wrist"], reacher["r_wrist"]):
+        if wrist is None:
+            continue
+
+        # A: wrist inside the neighbor's personal zone.
+        if math.hypot(wrist[0] - tx, wrist[1] - ty) < target["shoulder_width"] * REACH_ZONE_RADIUS_MULTIPLIER:
+            return wrist
+
+        # B: arm stretched out toward the neighbor (same row only).
+        if not same_row or abs(gap_x) < 1:
+            continue
+        extension = math.hypot(wrist[0] - rx, wrist[1] - ry) / sw
+        if extension < REACH_EXTENSION_MULTIPLIER:
+            continue
+        if abs(wrist[1] - ry) > 2.5 * sw:
+            continue
+        progress = (wrist[0] - rx) / gap_x
+        if progress >= REACH_PROGRESS_MIN:
+            return wrist
+    return None
+
+
+# ==========================================
+# SMARTWATCH STATIC-POSITION TRACKER (Guard A)
 # ==========================================
 def _check_static_clocks(entry, centers, now):
     """Update the per-camera tracker for clock bbox centres and return the
-    set of indices (into `centers`) that are suppressed because the object
-    has sat in the same spot for >= STATIC_CLOCK_SEC (almost certainly a
-    wall clock).
-
-    State lives in entry['static_objects']:
-        { int_id: {"center": (x,y), "static_since": float, "last_seen": float} }
-    The special key '__next' holds the running ID counter.
-    """
+    set of indices (into `centers`) suppressed because the object has sat in
+    the same spot for >= STATIC_CLOCK_SEC (almost certainly a wall clock)."""
     tracker  = entry["static_objects"]
     NEXT_KEY = "__next"
     next_id  = tracker.get(NEXT_KEY, 0)
 
-    # Expire clusters not seen recently.
     stale = [k for k in list(tracker)
              if k != NEXT_KEY and now - tracker[k]["last_seen"] > 3.0]
     for k in stale:
@@ -390,7 +446,6 @@ def _check_static_clocks(entry, centers, now):
             td = tracker[best_id]
             td["last_seen"] = now
             if best_dist > STATIC_CLOCK_MOVE_PX:
-                # Object shifted -- reset the static timer.
                 td["static_since"] = now
                 td["center"]       = center
             elif now - td["static_since"] >= STATIC_CLOCK_SEC:
@@ -404,27 +459,15 @@ def _check_static_clocks(entry, centers, now):
 
 
 # ==========================================
-# BACKGROUND DETECTION THREAD (Fix 3)
+# BACKGROUND DETECTION THREAD
 # ==========================================
 def _detection_loop(camera_id):
-    """Per-camera daemon thread.
+    """Per-camera daemon thread.  Owns ALL frame reading, YOLO inference, HUD
+    drawing, session recording, and incident logging.  Stores the latest
+    annotated JPEG in entry['latest_frame'] for generate_frames().
 
-    Owns ALL frame reading, YOLO inference, HUD drawing, session recording,
-    and incident logging.  Stores the latest annotated JPEG in
-    entry['latest_frame'] so generate_frames() can serve it to any number
-    of browser tabs with zero YOLO work and zero interference between them.
-
-    Lifecycle:
-        activate_camera() -> clears stop_event, starts this thread
-        pause_camera()    -> sets stop_event -> thread exits loop
-                             -> finally-block finalises recording
-        remove_camera()   -> same, then drops entry from registry
-
-    Video-file cameras (cam_type == "file") loop back to frame 0 on EOF for
-    continuous demo replay / threshold tuning without needing a live camera.
-
-    Live cameras (local/ip) drain their internal buffer each cycle -- this
-    is the Fix 4 live-feed lag fix.
+    Video-file cameras loop back to frame 0 on EOF for demo replay.
+    Live cameras drain their internal buffer each cycle to avoid lag.
     """
     entry = camera_registry.get(camera_id)
     if entry is None:
@@ -444,8 +487,6 @@ def _detection_loop(camera_id):
                     time.sleep(0.05)
                     continue
 
-                # Fix 4 -- live cameras: drain buffered frames so we always
-                # process the NEWEST one.  Video files must not skip frames.
                 if entry["type"] != "file":
                     for _ in range(4):
                         if stop_event.is_set():
@@ -456,7 +497,6 @@ def _detection_loop(camera_id):
 
             if not success:
                 if entry["type"] == "file":
-                    # End of file -- loop back to the start for demo replay.
                     with entry["lock"]:
                         cap = entry["cap"]
                         if cap is not None:
@@ -464,7 +504,6 @@ def _detection_loop(camera_id):
                     time.sleep(0.1)
                     continue
                 else:
-                    # Live camera disconnected -- attempt reconnect.
                     with entry["lock"]:
                         if entry["cap"] is not None:
                             entry["cap"].release()
@@ -491,20 +530,16 @@ def _detection_loop(camera_id):
             stable_since     = entry["stable_since"]
             stable_anchor    = entry["stable_anchor"]
             track_first_seen = entry["track_first_seen"]
+            track_last_seen  = entry["track_last_seen"]
+            calib_samples    = entry["calib_samples"]
+            baseline_height  = entry["baseline_height"]
+            pitch_history    = entry["pitch_history"]
 
             cv2.putText(frame, f"CAM: {entry['label']}", (20, h - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
             if not monitoring_active:
-                gaze_timers.clear()
-                turn_history.clear()
-                pair_timers.clear()
-                reach_timers.clear()
-                baseline_ratio.clear()
-                calib_start.clear()
-                stable_since.clear()
-                stable_anchor.clear()
-                track_first_seen.clear()
+                _clear_tracking_state(entry)
                 _finish_recording(entry)
                 cv2.putText(frame, "MONITORING PAUSED", (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
@@ -525,9 +560,6 @@ def _detection_loop(camera_id):
             # ==========================================
             # 1. PROHIBITED OBJECT DETECTION (YOLO)
             # ==========================================
-            # Collect detections only; drawing is deferred to section 2.5
-            # so the smartwatch filter can annotate suppressed detections
-            # differently from live ones.
             object_detections = []
             try:
                 obj_results = entry["object_model"](frame, stream=True, verbose=False)
@@ -551,7 +583,7 @@ def _detection_loop(camera_id):
             # ==========================================
             students        = []
             active_ids      = []
-            wrist_positions = []   # (x, y) of every visible wrist -- for clock guard B
+            wrist_positions = []
 
             try:
                 pose_results = entry["pose_model"].track(
@@ -559,7 +591,9 @@ def _detection_loop(camera_id):
                     persist=True,
                     tracker="bytetrack.yaml",
                     stream=True,
-                    verbose=False
+                    verbose=False,
+                    iou=POSE_IOU,
+                    conf=POSE_CONF,
                 )
 
                 for r in pose_results:
@@ -575,10 +609,42 @@ def _detection_loop(camera_id):
                     else:
                         track_ids = [None] * len(kpts)
 
+                    # --- PRE-PASS: register first-seen times and collect
+                    # valid candidates so ghost skeletons can be dropped
+                    # BEFORE they touch any timer, baseline, or violation. ---
+                    candidates = []
                     for idx, person in enumerate(kpts):
                         track_id = track_ids[idx] if idx < len(track_ids) else None
                         if track_id is None:
                             continue
+
+                        if confs is not None:
+                            if (confs[idx][5] < MIN_KEYPOINT_CONF or
+                                    confs[idx][6] < MIN_KEYPOINT_CONF):
+                                continue
+                            pair_conf = float(confs[idx][5] + confs[idx][6]) / 2.0
+                        else:
+                            pair_conf = 1.0
+
+                        l_sh, r_sh = person[5], person[6]
+                        candidates.append({
+                            "idx":      idx,
+                            "track_id": track_id,
+                            "center":   ((l_sh[0] + r_sh[0]) / 2.0,
+                                         (l_sh[1] + r_sh[1]) / 2.0),
+                            "width":    max(20.0, abs(r_sh[0] - l_sh[0])),
+                            "conf":     pair_conf,
+                        })
+                        if track_id not in track_first_seen:
+                            track_first_seen[track_id] = current_time
+
+                    kept_idx = _select_unique_people(candidates, track_first_seen,
+                                                     current_time)
+
+                    for idx, person in enumerate(kpts):
+                        if idx not in kept_idx:
+                            continue
+                        track_id = track_ids[idx]
 
                         nose                   = person[0]
                         l_shoulder, r_shoulder = person[5],  person[6]
@@ -587,14 +653,10 @@ def _detection_loop(camera_id):
 
                         if confs is not None:
                             c_nose   = confs[idx][0]
-                            c_lsh    = confs[idx][5]
-                            c_rsh    = confs[idx][6]
                             c_lhip   = confs[idx][11]
                             c_rhip   = confs[idx][12]
                             c_lwrist = confs[idx][9]
                             c_rwrist = confs[idx][10]
-                            if c_lsh < MIN_KEYPOINT_CONF or c_rsh < MIN_KEYPOINT_CONF:
-                                continue
                         else:
                             c_nose = c_lhip = c_rhip = 1.0
                             c_lwrist = c_rwrist = 1.0
@@ -602,13 +664,6 @@ def _detection_loop(camera_id):
                         nose_confident = c_nose  >= MIN_KEYPOINT_CONF
                         hips_confident = (c_lhip >= MIN_KEYPOINT_CONF and
                                           c_rhip >= MIN_KEYPOINT_CONF)
-
-                        # Fix 6: remember the first time this track_id was seen,
-                        # so downstream checks can require a minimum track age
-                        # before trusting it (filters passing proctors / brief
-                        # ID-swap glitches).
-                        if track_id not in track_first_seen:
-                            track_first_seen[track_id] = current_time
 
                         # Collect visible wrists for clock guard B.
                         if c_lwrist >= MIN_KEYPOINT_CONF and l_wrist[0] > 0:
@@ -626,13 +681,10 @@ def _detection_loop(camera_id):
                                           (l_hip[1] + r_hip[1]) / 2)
                             spine_tilt = calculate_angle(hip_center, shoulder_center)
 
-                        # Wrist points for the note-passing / reach check below.
-                        # None when that wrist isn't confidently visible (e.g.
-                        # under the desk) rather than a guessed position.
                         l_wrist_pt = ((int(l_wrist[0]), int(l_wrist[1]))
-                                     if (c_lwrist >= MIN_KEYPOINT_CONF and l_wrist[0] > 0) else None)
+                                      if (c_lwrist >= REACH_WRIST_CONF and l_wrist[0] > 0) else None)
                         r_wrist_pt = ((int(r_wrist[0]), int(r_wrist[1]))
-                                     if (c_rwrist >= MIN_KEYPOINT_CONF and r_wrist[0] > 0) else None)
+                                      if (c_rwrist >= REACH_WRIST_CONF and r_wrist[0] > 0) else None)
 
                         students.append({
                             "track_id":        track_id,
@@ -657,16 +709,14 @@ def _detection_loop(camera_id):
 
                         # --- HEAD YAW: HORIZONTAL-DISPLACEMENT RATIO, WITH
                         #     ADAPTIVE PER-STUDENT "NORMAL POSITION" BASELINE ---
-                        # Measures the sideways nose offset from the shoulder-
-                        # line midpoint, in a coordinate frame rotated to
-                        # account for the student's seat/torso angle (ignores
-                        # pitch, so looking down at a paper isn't conflated
-                        # with turning sideways). That raw ratio is then
-                        # compared against THIS student's own learned
-                        # "forward" baseline rather than a universal zero,
-                        # so students seated off-centre aren't penalised.
+                        # Baseline = MEDIAN over the calibration window (not one
+                        # noisy frame).  A pitch term (nose height above the
+                        # shoulder line) separates "looking down at the paper"
+                        # from "turning sideways".
                         person_turn    = "FORWARD"
                         smoothed_ratio = 0.0
+                        adjusted_ratio = 0.0
+                        down_delta     = 0.0
 
                         if (nose_confident and nose[0] > 0
                                 and l_shoulder[0] > 0 and r_shoulder[0] > 0):
@@ -683,22 +733,25 @@ def _detection_loop(camera_id):
                             cos_t = math.cos(-shoulder_angle_rad)
                             sin_t = math.sin(-shoulder_angle_rad)
                             sideways_offset = d_x_head * cos_t - d_y_head * sin_t
+                            vertical_offset = d_x_head * sin_t + d_y_head * cos_t   # + = below shoulder line
                             raw_ratio       = sideways_offset / (shoulder_width / 2.0)
+                            raw_height      = -vertical_offset / shoulder_width      # + = nose above shoulder line
 
                             if track_id not in calib_start:
                                 calib_start[track_id]    = current_time
-                                baseline_ratio[track_id] = raw_ratio
+                                calib_samples[track_id]  = []
                                 stable_since[track_id]   = current_time
                                 stable_anchor[track_id]  = raw_ratio
 
                             if current_time - calib_start[track_id] < CALIBRATION_DURATION:
-                                # Still in the initial calibration window -- snap
-                                # the baseline and don't flag anything yet.
-                                baseline_ratio[track_id] = raw_ratio
+                                samples = calib_samples.setdefault(track_id, [])
+                                samples.append((raw_ratio, raw_height))
+                                baseline_ratio[track_id]  = float(np.median([x[0] for x in samples]))
+                                baseline_height[track_id] = float(np.median([x[1] for x in samples]))
+                                stable_anchor[track_id]   = baseline_ratio[track_id]
                                 person_turn = "CALIBRATING"
                             else:
-                                baseline       = baseline_ratio[track_id]
-                                adjusted_ratio = raw_ratio - baseline
+                                adjusted_ratio = raw_ratio - baseline_ratio[track_id]
 
                                 if track_id not in turn_history:
                                     turn_history[track_id] = deque(maxlen=SMOOTHING_WINDOW)
@@ -706,39 +759,78 @@ def _detection_loop(camera_id):
                                 smoothed_ratio = (sum(turn_history[track_id])
                                                   / len(turn_history[track_id]))
 
+                                if track_id not in pitch_history:
+                                    pitch_history[track_id] = deque(maxlen=SMOOTHING_WINDOW)
+                                pitch_history[track_id].append(raw_height)
+                                smoothed_height = (sum(pitch_history[track_id])
+                                                   / len(pitch_history[track_id]))
+                                down_delta   = baseline_height[track_id] - smoothed_height
+                                looking_down = down_delta > PITCH_DOWN_DELTA
+
                                 if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
                                     person_turn = "LOOKING LEFT"
                                 elif smoothed_ratio > HEAD_TURN_RATIO_THRESHOLD:
                                     person_turn = "LOOKING RIGHT"
 
-                                # --- Slow repositioning: let baseline drift toward
-                                # a new pose only if it is a moderate, steadily-held
-                                # shift and the student is NOT currently mid-violation.
-                                currently_flagged = track_id in gaze_timers
+                                if (person_turn != "FORWARD" and looking_down
+                                        and abs(smoothed_ratio) < HEAD_TURN_STRONG_RATIO):
+                                    person_turn = "LOOKING DOWN"   # reading / writing, not a violation
 
-                                if currently_flagged or abs(adjusted_ratio) > REPOSITION_JUMP_LIMIT:
-                                    stable_since[track_id]  = current_time
-                                    stable_anchor[track_id] = raw_ratio
+                                # Held posture: flagged for ages => new normal.
+                                if (track_id in gaze_timers and
+                                        current_time - gaze_timers[track_id] >= GAZE_REBASELINE_SEC):
+                                    baseline_ratio[track_id]  = raw_ratio
+                                    baseline_height[track_id] = raw_height
+                                    turn_history[track_id].clear()
+                                    pitch_history[track_id].clear()
+                                    gaze_timers.pop(track_id, None)
+                                    stable_since[track_id]    = current_time
+                                    stable_anchor[track_id]   = raw_ratio
+                                    person_turn = "FORWARD"
+                                    print(f"[{camera_id}] ID {track_id}: held posture for "
+                                          f"{GAZE_REBASELINE_SEC:.0f}s, re-baselined.")
                                 else:
-                                    if abs(raw_ratio - stable_anchor[track_id]) > REPOSITION_SETTLE_BAND:
+                                    # Slow repositioning: baseline drifts toward a
+                                    # steadily-held moderate shift.
+                                    currently_flagged = track_id in gaze_timers
+                                    if currently_flagged or abs(adjusted_ratio) > REPOSITION_JUMP_LIMIT:
                                         stable_since[track_id]  = current_time
                                         stable_anchor[track_id] = raw_ratio
                                     else:
-                                        held = current_time - stable_since[track_id]
-                                        if held >= REPOSITION_STABILITY_WINDOW:
-                                            baseline_ratio[track_id] += BASELINE_ADAPT_RATE * (
-                                                raw_ratio - baseline_ratio[track_id]
-                                            )
+                                        if abs(raw_ratio - stable_anchor[track_id]) > REPOSITION_SETTLE_BAND:
+                                            stable_since[track_id]  = current_time
+                                            stable_anchor[track_id] = raw_ratio
+                                        else:
+                                            held = current_time - stable_since[track_id]
+                                            if held >= REPOSITION_STABILITY_WINDOW:
+                                                baseline_ratio[track_id] += BASELINE_ADAPT_RATE * (
+                                                    raw_ratio - baseline_ratio[track_id])
+                                                baseline_height[track_id] += BASELINE_ADAPT_RATE * (
+                                                    raw_height - baseline_height[track_id])
+
+                        if DEBUG_OVERLAY and person_turn != "CALIBRATING":
+                            cv2.putText(frame, f"yaw {smoothed_ratio:+.2f} dn {down_delta:+.2f}",
+                                        (shoulder_center[0] - 45, shoulder_center[1] + 42),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
                         students[-1]["person_turn"] = person_turn
+                        last_turn = entry.setdefault("last_turn", {})
+                        if last_turn.get(track_id) != person_turn:
+                            print(f"[{camera_id}] ID {track_id}: {last_turn.get(track_id, '-')} -> "
+                                  f"{person_turn}  yaw={smoothed_ratio:+.2f} dn={down_delta:+.2f}")
+                            last_turn[track_id] = person_turn
                         active_ids.append(track_id)
 
-                        if person_turn not in ("FORWARD", "CALIBRATING"):
+                        if person_turn not in ("FORWARD", "CALIBRATING", "LOOKING DOWN"):
+                            entry["gaze_lost"].pop(track_id, None)
                             if track_id not in gaze_timers:
                                 gaze_timers[track_id] = current_time
                             elapsed = current_time - gaze_timers[track_id]
 
                             if elapsed >= GAZE_DURATION_THRESHOLD:
+                                if not entry.get("_gaze_logged", {}).get(track_id):
+                                    entry.setdefault("_gaze_logged", {})[track_id] = True
+                                    print(f"[{camera_id}] ID {track_id}: GAZE ALERT ({person_turn}, {elapsed:.1f}s)")
                                 gaze_trigger = True
                                 if not violation_reason:
                                     violation_reason     = "PROLONGED_SIDE_GAZE"
@@ -755,8 +847,20 @@ def _detection_loop(camera_id):
                                              max(20, shoulder_center[1] - 40)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                         else:
-                            gaze_timers.pop(track_id, None)
-                            turn_history.pop(track_id, None)
+                            in_grace = False
+                            if track_id in gaze_timers and person_turn != "CALIBRATING":
+                                entry["gaze_lost"].setdefault(track_id, current_time)
+                                in_grace = (current_time - entry["gaze_lost"][track_id]) < GAZE_GRACE_SEC
+                            if not in_grace:
+                                gaze_timers.pop(track_id, None)
+                                turn_history.pop(track_id, None)
+                                entry["gaze_lost"].pop(track_id, None)
+                                entry.get("_gaze_logged", {}).pop(track_id, None)
+                            if person_turn == "LOOKING DOWN":
+                                cv2.putText(frame, "looking down (ok)",
+                                            (shoulder_center[0] - 55,
+                                             max(20, shoulder_center[1] - 40)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
                             if person_turn == "CALIBRATING":
                                 cv2.putText(frame, "CALIBRATING...",
                                             (shoulder_center[0] - 55,
@@ -768,31 +872,29 @@ def _detection_loop(camera_id):
                 students   = []
                 active_ids = []
 
-            entry["gaze_timers"]       = {k: v for k, v in gaze_timers.items()    if k in active_ids}
-            entry["turn_history"]      = {k: v for k, v in turn_history.items()   if k in active_ids}
-            entry["baseline_ratio"]    = {k: v for k, v in baseline_ratio.items() if k in active_ids}
-            entry["calibration_start"] = {k: v for k, v in calib_start.items()    if k in active_ids}
-            entry["stable_since"]      = {k: v for k, v in stable_since.items()   if k in active_ids}
-            entry["stable_anchor"]     = {k: v for k, v in stable_anchor.items()  if k in active_ids}
-            entry["track_first_seen"]  = {k: v for k, v in track_first_seen.items() if k in active_ids}
-            track_first_seen = entry["track_first_seen"]
+            # Prune per-track state only after a track has been gone for
+            # TRACK_LOST_GRACE_SEC, so one missed frame doesn't wipe a
+            # student's baseline and force a re-calibration.
+            for tid in active_ids:
+                track_last_seen[tid] = current_time
+            for tid in list(track_first_seen):
+                track_last_seen.setdefault(tid, current_time)
+            expired = [tid for tid, ts in track_last_seen.items()
+                       if current_time - ts > TRACK_LOST_GRACE_SEC]
+            for tid in expired:
+                for key in PER_TRACK_KEYS:
+                    entry[key].pop(tid, None)
 
             established_ids = {tid for tid, seen in track_first_seen.items()
                                if current_time - seen >= TRACK_MIN_AGE_SEC}
 
             # ==========================================
-            # 2.6 CAMERA-BUMP DETECTION (Fix 5)
+            # 2.6 CAMERA-BUMP DETECTION
             # ==========================================
-            # If most already-calibrated, visible students all read as
-            # turned in this same frame, it's more likely the camera moved
-            # than that a majority of the class simultaneously cheated.
-            # Drop their calibration so each baseline silently reseeds via
-            # the existing CALIBRATING flow, instead of raising a wall of
-            # false gaze alerts while everyone "settles" against a baseline
-            # that no longer matches the camera's new angle.
             scored = [s for s in students if s["person_turn"] != "CALIBRATING"]
             if len(scored) >= CAMERA_BUMP_MIN_STUDENTS:
-                turned = sum(1 for s in scored if s["person_turn"] != "FORWARD")
+                turned = sum(1 for s in scored
+                             if s["person_turn"] in ("LOOKING LEFT", "LOOKING RIGHT"))
                 if (turned / len(scored) >= CAMERA_BUMP_RATIO
                         and current_time - entry["last_bump_time"] >= CAMERA_BUMP_COOLDOWN_SEC):
                     print(f"[{camera_id}] Possible camera disturbance: {turned}/{len(scored)} "
@@ -803,9 +905,8 @@ def _detection_loop(camera_id):
                     entry["turn_history"].clear()
 
             # ==========================================
-            # 2.5. SMARTWATCH FILTER (Fix 1)
+            # 2.5. SMARTWATCH FILTER
             # ==========================================
-            # Isolate clock detections, run both guards, then reassemble.
             clock_dets    = [(i, d) for i, d in enumerate(object_detections)
                              if d["name"] == "SMARTWATCH"]
             clock_centers = [d["center"] for _, d in clock_dets]
@@ -816,7 +917,6 @@ def _detection_loop(camera_id):
                 x1, y1, x2, y2 = det["bbox"]
 
                 if det["name"] != "SMARTWATCH":
-                    # Cell phones bypass both guards -- draw immediately.
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                     cv2.putText(frame, f"CELL PHONE ({det['confidence']*100:.0f}%)",
                                 (x1, max(y1 - 10, 20)),
@@ -824,7 +924,6 @@ def _detection_loop(camera_id):
                     accepted_detections.append(det)
                     continue
 
-                # Find this detection's position within clock_dets.
                 ck_idx = next(j for j, (oi, _) in enumerate(clock_dets) if oi == i)
 
                 # Guard A: static position (wall clock).
@@ -849,7 +948,6 @@ def _detection_loop(camera_id):
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (70, 70, 70), 1)
                         continue
 
-                # Passed both guards -- treat as a real smartwatch alert.
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(frame, f"SMARTWATCH ({det['confidence']*100:.0f}%)",
                             (x1, max(y1 - 10, 20)),
@@ -862,11 +960,7 @@ def _detection_loop(camera_id):
             # 3. ATTRIBUTE OBJECT DETECTIONS TO A STUDENT
             # ==========================================
             # Best-effort nearest-shoulder match, NOT a verified possession
-            # check -- a phone on a neighbouring desk close to another student
-            # can still be misattributed. Known limitation; state it if asked.
-            # Fix 6: only attribute to a track that's been established for
-            # TRACK_MIN_AGE_SEC, so a brand-new (possibly-swapped) track ID
-            # can't immediately absorb a violation.
+            # check.  Known limitation; state it if asked.
             if object_detections:
                 object_violation = True
                 best_det = max(object_detections, key=lambda d: d["confidence"])
@@ -887,11 +981,8 @@ def _detection_loop(camera_id):
                 violating_track_id = nearest_student["track_id"] if nearest_student else None
 
             # ==========================================
-            # 4. INTERACTION & DESK LEANING DETECTION (DURATION-GATED)
+            # 4. INTERACTION & DESK LEANING / REACH DETECTION
             # ==========================================
-            # Fix 6: only established tracks participate, so a proctor
-            # walking through the frame (or a momentary ID swap) can't pair
-            # up with a real student and start an interaction timer.
             interaction_candidates = [s for s in students if s["track_id"] in established_ids]
             active_pairs = []
             active_reach_pairs = []
@@ -904,6 +995,13 @@ def _detection_loop(camera_id):
                         s1["shoulder_center"][0] - s2["shoulder_center"][0],
                         s1["shoulder_center"][1] - s2["shoulder_center"][1])
                     avg_shoulder_w  = (s1["shoulder_width"] + s2["shoulder_width"]) / 2.0
+
+                    # Safety net: if a ghost skeleton still slipped past the
+                    # pre-pass filter, two "students" occupying the same
+                    # body are one person, not a pair.
+                    if dist < min(s1["shoulder_width"], s2["shoulder_width"]) * DUPLICATE_DIST_MULTIPLIER:
+                        continue
+
                     proximity_limit = avg_shoulder_w * PROXIMITY_MULTIPLIER
                     excessive_lean  = (s1["spine_tilt"] > SPINE_TILT_THRESHOLD_DEG or
                                        s2["spine_tilt"] > SPINE_TILT_THRESHOLD_DEG)
@@ -937,28 +1035,22 @@ def _detection_loop(camera_id):
                     else:
                         pair_timers.pop(pair_key, None)
 
-                    # --- Note-passing / reach check (independent of overall
-                    # torso proximity above -- two desks can sit at a normal
-                    # distance while an arm still crosses into the neighbor's
-                    # zone). Checked in both directions since either student
-                    # could be the one reaching. ---
+                    # --- Note-passing / reach check, both directions. ---
+                    if dist > avg_shoulder_w * REACH_MAX_PAIR_DIST_MULTIPLIER:
+                        continue
+                    same_row = abs(s1["shoulder_center"][1] - s2["shoulder_center"][1]) \
+                               < avg_shoulder_w * REACH_SAME_ROW_MULTIPLIER
+
                     for reacher, target in ((s1, s2), (s2, s1)):
-                        reach_key = (reacher["track_id"], target["track_id"])
-                        reach_wrist = None
-                        for wrist in (reacher["l_wrist"], reacher["r_wrist"]):
-                            if wrist is None:
-                                continue
-                            wd = math.hypot(wrist[0] - target["shoulder_center"][0],
-                                            wrist[1] - target["shoulder_center"][1])
-                            if wd < target["shoulder_width"] * REACH_ZONE_RADIUS_MULTIPLIER:
-                                reach_wrist = wrist
-                                break
+                        reach_key   = (reacher["track_id"], target["track_id"])
+                        reach_wrist = _find_reaching_wrist(reacher, target, same_row)
 
                         if reach_wrist is not None:
                             active_reach_pairs.append(reach_key)
                             if reach_key not in reach_timers:
-                                reach_timers[reach_key] = current_time
-                            r_elapsed = current_time - reach_timers[reach_key]
+                                reach_timers[reach_key] = {"start": current_time, "last": current_time}
+                            reach_timers[reach_key]["last"] = current_time
+                            r_elapsed = current_time - reach_timers[reach_key]["start"]
 
                             if r_elapsed >= REACH_DURATION_THRESHOLD:
                                 reach_violation = True
@@ -972,13 +1064,14 @@ def _detection_loop(camera_id):
                                 cv2.putText(frame, "REACH",
                                             (reach_wrist[0] - 20, max(20, reach_wrist[1] - 10)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2)
-                        else:
-                            reach_timers.pop(reach_key, None)
 
             entry["interaction_timers"] = {k: v for k, v in pair_timers.items()
                                            if k in active_pairs}
-            entry["reach_timers"] = {k: v for k, v in reach_timers.items()
-                                     if k in active_reach_pairs}
+            # Keep a reach timer alive through brief keypoint dropouts.
+            for k in [k for k, v in reach_timers.items()
+                      if k not in active_reach_pairs
+                      and current_time - v["last"] > REACH_GRACE_SEC]:
+                reach_timers.pop(k, None)
 
             # ==========================================
             # 5. HUD / DASHBOARD STATUS OVERLAY
@@ -1025,31 +1118,24 @@ def _detection_loop(camera_id):
                     print(f"[{camera_id}] NEW INCIDENT {violation_reason} "
                           f"(track_id={violating_track_id}, t={inc['start']:.1f}s)")
 
-            # Store the annotated frame for the HTTP streamer.
             ret, buf = cv2.imencode('.jpg', frame)
             if ret:
                 entry["latest_frame"] = buf.tobytes()
 
     finally:
-        # Always finalise the recording when this thread exits -- whether from
-        # a normal stop_event signal, an unhandled exception, or app shutdown.
         _finish_recording(entry)
 
 
 # ==========================================
-# HTTP FRAME STREAMING (Fix 3)
+# HTTP FRAME STREAMING
 # ==========================================
 def generate_frames(camera_id):
-    """Serves the latest annotated JPEG produced by _detection_loop.
-
-    No YOLO work happens here.  Multiple browser tabs can connect
-    simultaneously without interfering with detection or with each other --
-    they all read the same entry['latest_frame'] byte string.
-    """
+    """Serves the latest annotated JPEG produced by _detection_loop.  No YOLO
+    work happens here, so multiple browser tabs don't interfere."""
     while True:
         entry = camera_registry.get(camera_id)
         if entry is None:
-            break   # camera was removed; end the generator gracefully
+            break
 
         if entry["status"] != "active":
             msg = "PAUSED" if entry["status"] == "paused" else "NOT IN USE"
@@ -1071,17 +1157,11 @@ def generate_frames(camera_id):
 
 
 # ==========================================
-# ACCESS CONTROL (Fix 8, upgraded to named accounts)
+# ACCESS CONTROL
 # ==========================================
-# The app used to bind to 0.0.0.0 with no auth -- anyone on the classroom
-# Wi-Fi could open the dashboard, watch every camera, or hit Reset Session.
-# This started as one shared password; it's now per-user accounts (see
-# auth.py): hashed, salted passwords, and actions below can be attributed
-# to whoever is signed in instead of "whoever has the password". A
-# persistent CERBERUS_SECRET_KEY is optional -- without one, a new random
-# key is generated each run and everyone is signed out on restart, which
-# is a reasonable default; set it if you'd rather sessions survive a
-# restart.
+# Per-user accounts (see auth.py).  A persistent CERBERUS_SECRET_KEY is
+# optional -- without one, a new random key is generated each run and
+# everyone is signed out on restart.
 app.secret_key = os.environ.get("CERBERUS_SECRET_KEY") or secrets.token_hex(32)
 
 PUBLIC_ENDPOINTS = {"login", "signup"}
@@ -1090,6 +1170,8 @@ PUBLIC_ENDPOINTS = {"login", "signup"}
 @app.before_request
 def _require_login():
     if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
+        return
+    if request.endpoint == "static":
         return
     if not session.get("user_id"):
         return redirect(url_for("login"))
@@ -1180,23 +1262,17 @@ def add_camera_route():
     if not raw_source:
         return jsonify({"status": "error", "message": "Source is required"}), 400
 
-    # --- Determine source type ---
-
     if raw_source.isdigit():
-        # Local webcam device index.
         source   = int(raw_source)
         cam_type = "local"
 
     elif os.path.isfile(raw_source):
-        # Fix 2: video file path.  OpenCV reads files the same way it reads
-        # live cameras, so the detection loop needs no further changes.
-        # On EOF the loop rewinds to frame 0 for continuous demo replay.
+        # Video file path; loops on EOF for continuous demo replay.
         source   = raw_source
         cam_type = "file"
 
     elif (raw_source.startswith("http://") or raw_source.startswith("https://")
           or raw_source.startswith("rtsp://")):
-        # IP camera / RTSP stream URL.
         source   = raw_source
         cam_type = "ip"
 
@@ -1262,11 +1338,9 @@ def stop_monitoring():
     return jsonify({"status": "stopped"})
 
 
-# Fix 9: Reset Session permanently deletes every recording, thumbnail, and DB
-# row for the session. A single mouse-click confirm() is too easy to fire by
-# accident, so the frontend must now prompt the operator to TYPE a fixed
-# phrase, and the backend independently checks it matches -- a stray click
-# with no typed confirmation is always rejected.
+# Reset Session permanently deletes every recording, thumbnail, and DB row
+# for the session, so the operator must TYPE a fixed phrase and the backend
+# independently checks it.
 RESET_CONFIRM_PHRASE = "DELETE ALL DATA"
 
 
@@ -1274,8 +1348,8 @@ RESET_CONFIRM_PHRASE = "DELETE ALL DATA"
 def reset_session():
     """Deletes all logged violations, incidents, recordings, and evidence
     photos for the current session, and clears in-memory tracking state for
-    every registered camera. Requires monitoring to be paused first, and
-    requires the exact confirmation phrase in the request body."""
+    every registered camera.  Requires monitoring to be paused first, and
+    the exact confirmation phrase in the request body."""
     global monitoring_active
 
     if monitoring_active:
@@ -1306,27 +1380,14 @@ def reset_session():
 
     for cam_id, entry in list(camera_registry.items()):
         os.makedirs(os.path.join(session_dir, cam_id), exist_ok=True)
-        entry["gaze_timers"].clear()
-        entry["turn_history"].clear()
-        entry["interaction_timers"].clear()
-        entry["reach_timers"].clear()
-        entry["baseline_ratio"].clear()
-        entry["calibration_start"].clear()
-        entry["stable_since"].clear()
-        entry["stable_anchor"].clear()
-        entry["static_objects"].clear()
-        entry["track_first_seen"].clear()
+        _clear_tracking_state(entry)
 
     return jsonify({"status": "reset", "session_id": CURRENT_SESSION})
 
 
 # ==========================================
-# PER-EXAM SESSIONS (Fix 10)
+# PER-EXAM SESSIONS
 # ==========================================
-# CURRENT_SESSION used to be a hardcoded constant, so two exams run the same
-# day landed in the same recordings/DB rows. This lets the operator name a
-# new session between exams; each camera gets a fresh recorder + incident
-# tracker bound to the new name, so nothing from the old session leaks in.
 
 @app.route('/session', methods=['GET'])
 def get_session_route():
@@ -1381,9 +1442,8 @@ def incidents_route():
 
 @app.route('/incidents/<int:inc_id>/dismiss', methods=['POST'])
 def dismiss_incident_route(inc_id):
-    """Fix 6: lets a reviewer mark a flag as a false positive (a tracking
-    glitch, a passing proctor, a misfire) without deleting the underlying
-    evidence -- the incident stays in the record, just tagged dismissed."""
+    """Lets a reviewer mark a flag as a false positive without deleting the
+    underlying evidence -- the incident stays in the record, tagged dismissed."""
     dismiss_incident(inc_id, True)
     print(f"[incidents] {session.get('username', 'unknown')} dismissed incident #{inc_id}")
     return jsonify({"status": "dismissed", "id": inc_id})
@@ -1427,14 +1487,9 @@ def system_stats():
 
 
 if __name__ == '__main__':
-    # debug=False: Flask's reloader can double-import this module, which would
-    # double-open cameras and expose raw stack traces in-browser -- not what
-    # you want in front of a panel.
-    # threaded=True: /video_feed/<id> is a long-lived streaming connection per
-    # camera; without threading other requests queue behind it.
-    # host: Fix 8 -- default to localhost only. Set CERBERUS_HOST=0.0.0.0 to
-    # allow other devices on the network to reach the dashboard (needed if
-    # you view it from a phone/second laptop), but then make sure
-    # CERBERUS_PASSWORD is set to something real first.
+    # debug=False: the reloader can double-import this module and double-open
+    # cameras.  threaded=True: each /video_feed is a long-lived connection.
+    # Default host is localhost only; set CERBERUS_HOST=0.0.0.0 to allow
+    # other devices on the network to reach the dashboard.
     app.run(debug=False, threaded=True,
-             host=os.environ.get("CERBERUS_HOST", "127.0.0.1"), port=5000)
+            host=os.environ.get("CERBERUS_HOST", "127.0.0.1"), port=5000)
