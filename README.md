@@ -1,52 +1,40 @@
-# CERBERUS AI: Classroom Examination Monitoring System
+# CERBERUS — Classroom Examination Monitoring System
 
-A Flask app that watches classroom cameras during an exam, flags possible violations with computer vision, and records the session so a human can review each flag in context.
+CERBERUS is a computer-vision assistant for exam proctors. It watches one or more classroom cameras, flags **suspicious behavior** in real time, records the whole session, and lets a reviewer jump to each flagged moment afterwards.
 
-CERBERUS flags things for review. It does not decide that anyone cheated.
+> **CERBERUS flags; a human decides.** Every alert is a prompt for review, not proof of cheating. Read [Limitations](#limitations) before relying on any result.
+
+---
 
 ## What it detects
 
-| Violation | How it works |
-|---|---|
-| Unauthorized device | YOLO object detection for cell phones and smartwatches (COCO classes `cell phone` and `clock`, used as a smartwatch proxy). A wall clock is filtered out if it's stationary or not near a wrist. Matched to the nearest established student. |
-| Prolonged side gaze | YOLO-pose keypoints give a head-turn ratio (nose offset from the shoulder midpoint, corrected for seat angle). Each student has their own "forward" baseline, calibrated in the first 2 seconds and slowly adapted if they settle into a new position. A flag needs the turn held for 3 seconds. |
-| Student interaction / desk leaning | Shoulder-to-shoulder proximity (scaled by shoulder width) or excessive spine tilt, held for 3 seconds. |
-| Reaching / note passing | A wrist keypoint held inside a neighboring student's zone for 1 second — catches an outstretched arm even when the two torsos aren't close enough to trip the interaction check above. |
+| Detector | What it looks for | Default |
+|---|---|---|
+| **Phone** | Cell phone detected by YOLO (COCO class 67), attributed to the nearest student | On |
+| **Smartwatch** | Clock-like object (COCO class 74) near a visible wrist; static wall clocks are suppressed | Off |
+| **Prolonged side gaze** | Head turned left/right for 3 s or more, measured against each student's own calibrated "normal" position | On |
+| **Reaching / note passing** | A wrist entering a neighbor's zone, or an arm stretched toward a side-by-side neighbor, for 1 s or more | On |
 
-Students are tracked across frames with ByteTrack. A track has to exist for at least a second before it can be attributed a violation, so a passing proctor or a momentary tracking glitch can't trigger a false flag.
+Each rule can be switched on or off during an exam from the **Detection Rules** row on the dashboard (see [Exam rules](#exam-rules)). Turn **Phones** off if the exam allows calculators, since YOLO cannot tell a calculator from a phone.
 
-If a large fraction of visible, already-calibrated students all read as turned in the same frame, it's treated as a probable camera bump (not mass cheating): their calibration is dropped and silently reseeded instead of raising a wall of false alerts.
+### How it works (short version)
 
-## How evidence works
+1. **Pose + tracking:** `yolo11n-pose` with ByteTrack gives each student a persistent ID and body keypoints.
+2. **Duplicate filter:** two skeletons on the same body are collapsed into one so a "ghost" student can't trigger alerts.
+3. **Per-student baseline:** for the first 2 s a student is seen, their head position is sampled to set what "looking forward" means for them. The baseline adapts slowly if they settle into a new position, and re-baselines if a posture is held for a long time. This is what stops a student seated at the edge of the frame being flagged.
+4. **Gaze:** the nose's sideways offset from the shoulder line, as a ratio of shoulder width. Moderate readings with the head tilted down are treated as looking at one's own paper and ignored; strong sideways turns are always flagged.
+5. **Reach:** only students at a similar depth, in the same row, and genuinely side by side are checked for a hand-off. This is essential on angled cameras, where students in different rows overlap in the image.
+6. **Objects:** `yolo11n` finds phones/clocks; clock detections must be near a wrist and not static to count as a watch.
+7. **Incidents:** repeated triggers for the same person and reason are grouped into one incident with one thumbnail and a timestamp in the session recording.
 
-- **Session recording:** each camera records its own video while monitoring is armed, auto-rotating to a new file every 5 minutes so a crash loses at most one chunk instead of the whole exam. Any file left open by a previous crash is recovered on startup.
-- **Incidents, not screenshots:** repeated triggers for the same student and violation type within 10 seconds become one incident with a start time, an end time, and a confidence score, plus one thumbnail.
-- **Review page (`/review`):** shows the video, timeline markers, and the incident list. Clicking an incident plays the recording from 5 seconds before the alert. Incidents can be **dismissed** (marked as reviewed false positives) without deleting the underlying evidence; filter the list to active or dismissed only.
-- The dashboard's evidence popup has a "Watch recording" button that opens the same page at that incident.
-
-## Accounts & access
-
-- The app binds to `127.0.0.1` by default — set `CERBERUS_HOST=0.0.0.0` if you need it reachable from another device (e.g. viewing from a phone), and only do that on a network you trust.
-- Every page requires signing in. Accounts are per-user, with passwords hashed (never stored in plaintext).
-- Creating an account requires an invite code, printed to the console each time the app starts unless you set `CERBERUS_INVITE_CODE` yourself. Share that code with whoever needs an account; each person then sets their own username and password.
-- Reset Session and incident dismissal are attributed to whoever is signed in (printed to the console as a lightweight audit trail).
-
-## Sessions
-
-- `CURRENT_SESSION` groups all recordings, incidents, and violations. Start a new one between exams (dashboard header, "New" button) so two exams the same day don't share data — each camera gets a fresh recorder and incident tracker. Requires monitoring to be paused first.
-- **Reset Session** permanently deletes everything for the current session (recordings, incidents, evidence, DB rows). It requires monitoring to be paused and requires typing the exact confirmation phrase shown in the prompt — a stray click can't trigger it.
-
-## Features
-
-- Multi-camera support: local webcam (Scan), IP camera by URL, or a video file path (for offline demos or replaying the same footage while tuning thresholds). Each camera runs its own detection thread — closing the browser tab does not stop detection or recording, and multiple tabs can view the same feed without interfering with each other.
-- ARM / PAUSE monitoring for the whole session.
-- Live dashboard with counters, an audit log, and an evidence gallery with filters (devices, collab, reaching, gaze).
+---
 
 ## Requirements
 
 - Python 3.10+
-- `flask`, `opencv-python`, `ultralytics`, `numpy`, `werkzeug` (installed automatically with Flask)
-- **ffmpeg** on your PATH (strongly recommended). OpenCV records with a codec browsers usually can't play, and ffmpeg converts each recording to H.264 after it closes. Without it the review page may not play the videos.
+- A webcam, a phone running **IP Webcam**, an RTSP/HTTP stream, or a video file
+- A GPU is strongly recommended for more than a couple of students (CPU works but is slow)
+- `ffmpeg` on your PATH is recommended for recordings
 
 ```bash
 pip install flask opencv-python ultralytics numpy
@@ -54,76 +42,109 @@ pip install flask opencv-python ultralytics numpy
 
 The YOLO weights (`yolo11n-pose.pt`, `yolo11n.pt`) are downloaded automatically by Ultralytics on first run.
 
-## Run
+## Run it
 
 ```bash
 python app.py
 ```
 
-On startup, note the printed **invite code** (for creating accounts) — set `CERBERUS_PASSWORD`-style env vars ahead of time for a real exam rather than relying on the random one:
+Open <http://127.0.0.1:5000>, sign up (an invite code is required, see `auth.py`), and log in. The console prints the build ID on startup so you can confirm which version is running.
 
-```bash
-export CERBERUS_INVITE_CODE="something-only-your-proctors-know"
-export CERBERUS_SECRET_KEY="a-long-random-string"   # optional: keeps logins across restarts
-python app.py
+| Environment variable | Purpose |
+|---|---|
+| `CERBERUS_SECRET_KEY` | Keeps logins valid across restarts (otherwise a random key is generated each run) |
+| `CERBERUS_HOST` | Set to `0.0.0.0` to reach the dashboard from other devices (default is localhost only) |
+
+## Using it
+
+1. **Add a camera** on the dashboard: scan for local cameras, or enter an IP camera URL (for IP Webcam use `http://<phone-ip>:8080/video`), an RTSP URL, or a video file path. Video files loop, which is handy for demos.
+2. Click **Use** on the camera tile to start it. Cameras can be paused or removed at any time.
+3. Set the **Detection Rules** for this exam.
+4. Click **ARM MONITORING**. Students are calibrated during their first couple of seconds on camera, so ask them to sit normally.
+5. Watch the live log and evidence gallery. **PAUSE SYSTEM** stops monitoring.
+6. Afterwards open **REVIEW RECORDINGS**: a video player with a marker for each incident. Reviewers can dismiss false positives without deleting the evidence.
+7. Use **New** next to the session name to start a separate session for each exam.
+8. **RESET SESSION** permanently deletes that session's recordings, thumbnails and database rows. It requires monitoring to be paused and the phrase `DELETE ALL DATA` to be typed.
+
+### Exam rules
+
+`GET` / `POST /settings` reads and changes the rules; the dashboard checkboxes use it. Every change is printed to the console with the username, and the active rules are printed when monitoring starts, so there is a record of why something was or wasn't flagged.
+
+```json
+{ "phone": true, "watch": false, "reach": true, "gaze": true }
 ```
 
-Then open http://127.0.0.1:5000, sign up (with the invite code) or sign in, and:
+## Camera placement matters most
 
-1. Scan for a local camera, or add an IP camera URL / video file path.
-2. Click **Use** on the camera tile.
-3. Click **ARM MONITORING**.
-4. When the exam ends, click **PAUSE SYSTEM** and wait a few seconds. Then open **Review recordings**.
+Most of the tuning problems seen in testing came from the camera, not the code.
 
-Keep the dashboard tab open at least until a camera is activated — after that, detection and recording run in a background thread independent of the browser.
+- Mount the camera **above head height, at the front, looking back** at the class, so rows run roughly horizontally across the image.
+- A low camera in a corner makes students overlap and makes row-based logic (reach) unreliable.
+- Students should be at least ~60 px wide across the shoulders in the image for reliable pose and head-turn readings. Back rows of a large room may not be detected.
+- Use the highest stream resolution your hardware can keep real-time.
 
-## Project structure
+## Tuning
 
-```
-app.py                  Flask app, detection loop, camera registry, routes
-auth.py                 Per-user accounts (hashed passwords, invite codes)
-recording.py            Session recorder, incident tracker, crash recovery
-database.py             SQLite logging for the violations table
-templates/index.html    Live dashboard
-templates/review.html   Incident review page
-templates/login.html    Sign in
-templates/signup.html   Create account (invite code required)
-static/script.js        Dashboard logic
-static/style.css        Dashboard styling
-static/violations/      Incident thumbnails (generated)
-recordings/             Session videos (generated)
-incidents.db            Incident index (generated)
-users.db                Accounts (generated)
-```
+All thresholds are **hand-calibrated, not learned**. They sit at the top of `app.py`. Test at real exam spacing before relying on them.
 
-## Configuration
-
-Thresholds are at the top of `app.py`. They are hand-calibrated, not learned, so test them in a real session at real exam spacing before relying on them.
-
-| Setting | Default | Effect |
+| Constant | Default | Effect |
 |---|---|---|
-| `HEAD_TURN_RATIO_THRESHOLD` | 0.6 | How far a head must turn to count as looking sideways. Lower is more sensitive. |
-| `GAZE_DURATION_THRESHOLD` | 3.0 s | How long a turn must be held before it is flagged. |
-| `PROXIMITY_MULTIPLIER` | 1.8 | How close two students must be to count as interacting. |
-| `INTERACTION_DURATION_THRESHOLD` | 3.0 s | How long they must stay close. |
-| `REACH_ZONE_RADIUS_MULTIPLIER` | 1.3 | How large a neighbor's "personal zone" is, for the reach check. |
-| `REACH_DURATION_THRESHOLD` | 1.0 s | How long a wrist must stay in that zone. |
-| `CALIBRATION_DURATION` | 2.0 s | How long the initial "forward" baseline is sampled. |
-| `CAMERA_BUMP_RATIO` / `CAMERA_BUMP_MIN_STUDENTS` | 0.6 / 3 | Fraction of visible students turned at once, and minimum headcount, before it's treated as a camera bump rather than mass cheating. |
-| `TRACK_MIN_AGE_SEC` | 1.0 s | How long a track must exist before it can be attributed a violation. |
+| `HEAD_TURN_RATIO_THRESHOLD` | 0.45 | Sideways head offset that counts as a turn |
+| `HEAD_TURN_STRONG_RATIO` | 0.7 | Turns above this are never excused as "looking down" |
+| `PITCH_DOWN_DELTA` | 0.30 | Nose drop that marks "looking down at own paper" |
+| `GAZE_DURATION_THRESHOLD` | 3.0 s | How long a turn must last before it is flagged |
+| `GAZE_REQUIRE_NEIGHBOR` | False | If True, a turn only counts when another student sits on that side |
+| `REACH_DURATION_THRESHOLD` | 1.0 s | How long a reach must last |
+| `REACH_SAME_ROW_MULTIPLIER` | 1.0 | Max vertical offset between paired students |
+| `REACH_DEPTH_RATIO_MIN/MAX` | 0.75 / 1.33 | Shoulder-width ratio band for "same depth" |
+| `REACH_MIN_SIDE_GAP_MULTIPLIER` | 1.2 | Minimum horizontal gap so someone directly behind isn't paired |
 
-Recording settings (`RECORD_FPS`, `RECORD_MAX_WIDTH`, `RECORD_CHUNK_SEC`, `INCIDENT_GAP_SEC`) are at the top of `recording.py`.
+The overlay shows `yaw` and `dn` (nose drop) beside each student, and the console logs every state change, which is how these numbers should be tuned.
 
-## Known limitations
+## Project layout
 
-- Detection is heuristic and **has only been tested solo**, never with a full class in frame. Interaction and reach thresholds in particular are a first guess, not validated at real seating density.
-- Phone-to-student and reach attribution use nearest-shoulder matching, not verified possession — a phone or reach can be misattributed to the wrong student.
-- Head-turn detection uses pose keypoints, not eye tracking. It can't tell what a student is looking at.
-- Student track IDs are per-camera and don't persist across a pause/resume or link the same person across two cameras.
-- Recordings are only playable once a chunk closes (on PAUSE, or every 5 minutes during a long session).
-- No named-student identity (no face recognition) — a violation is tied to a track number, not a roster entry. See the project notes for why (pixel-distance constraints at classroom range) and what a seat-mapping approach would look like if named attribution is ever required.
-- Built and tested as a college demo, not for production deployment.
+```
+app.py          Flask app, camera registry, detection loop, routes
+database.py     SQLite violation log
+recording.py    Session recording and incident grouping
+auth.py         User accounts (invite code required to sign up)
+templates/      index.html (dashboard), review.html, login/signup
+static/         script.js, style.css, saved evidence thumbnails
+recordings/     Session videos (generated)
+```
 
-## Privacy
+Keep generated data (recordings, evidence images, `*.db`) out of version control.
 
-Recordings contain video of students and their surroundings. Get consent before use, and delete recordings once the review period ends (Reset Session does this, with confirmation required). Do not commit `recordings/`, `incidents.db`, `static/violations/`, or `users.db` to git — the included `.gitignore` excludes them.
+## Design decisions
+
+- **Student-interaction (shoulder proximity) detection was removed.** It fired on normal seating, could not be checked against the test data, and duplicated what side gaze and reach already cover.
+- **Reach only checks students who are side by side.** From a camera that isn't overhead, a student sitting behind another looks close to them in the image, and 2D geometry cannot separate that from a real hand-off.
+- **Evidence is a recording plus a thumbnail per incident**, not repeated screenshots, so a reviewer sees context.
+
+## Testing
+
+Test with clips of each behavior and, just as importantly, clips of **normal** behavior. Recommended:
+
+- The public [Student Cheating Behavior dataset](https://www.kaggle.com/datasets/fairouzfarouq/student-cheating-behavior-dataset) (exchanging papers, looking at another student's paper, cheat sheet, phone, not cheating)
+- Staged clips with classmates from your own camera and room
+
+Record how often each detector fires per minute on normal-behavior clips, and which detector fires on each cheating clip:
+
+| Clip type | Expected detector | Fired? | False alerts / min |
+|---|---|---|---|
+| Not cheating | none | | |
+| Looking at another student | Gaze | | |
+| Exchanging papers | Reach | | |
+| Phone | Phone | | |
+| Cheat sheet | none (not supported) | | |
+
+## Limitations
+
+- **Cheat sheets are not detected.** No model here recognizes paper notes, and one in a lap or under a desk is invisible to a room camera.
+- **Phones are only detected when visible.** Small, tilted, hand-covered or hidden phones are often missed, especially in back rows. Calculators may be flagged as phones.
+- **Smartwatch detection is weak.** YOLO cannot tell a smartwatch from a regular watch, and a wrist is tiny at classroom distance, so it is off by default.
+- **Reach only covers side-by-side neighbors**, not notes passed forward or backward between rows.
+- **Gaze measures head direction, not eye direction**, and only left/right; turning around to look behind is not covered.
+- **Thresholds are hand-set** and were tuned on a small number of clips. Expect to re-tune for a new room or camera position.
+- **False positives and false negatives both happen.** Treat alerts as leads for human review.
+- **Privacy:** recording students requires consent and a retention policy appropriate to your institution. Use **Reset Session** or delete recordings once they are no longer needed.

@@ -20,7 +20,7 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
 from auth import init_auth_db, create_user, verify_user
 
-BUILD_ID = "2026-09-30-r6-lower-yaw-thr-gaze-grace"
+BUILD_ID = "2026-09-30-r13-wrist-gate"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -54,6 +54,42 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SMOOTHING_WINDOW = 5
 
+# --- DETECTION RULE SWITCHES (change live via POST /settings) ---
+# Per-exam rules.  A regular watch or an allowed calculator looks like a
+# "smartwatch" / "cell phone" to YOLO, so turn those off when the exam allows
+# them.  Interaction (shoulder proximity) is OFF by default: it has no
+# ground-truth class in the test dataset and fires on normal seating.
+DETECTION_ENABLED = {
+    "phone":       True,
+    "watch":       False,
+    "reach":       True,
+    "gaze":        True,
+}
+
+# --- WRIST-CROP PHONE PASS ---
+# Second, zoomed-in phone check on a crop around each wrist (see
+# _merge_wrist_phones).  Governed by DETECTION_ENABLED["phone"] as well.
+WRIST_CROP_ENABLED      = True
+WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
+WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
+WRIST_CROP_IMGSZ        = 320    # crops are upscaled to this before inference
+WRIST_CROP_CONF         = 0.30   # lower than the full-frame 0.45; persistence compensates
+WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
+WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
+WRIST_CROP_MIN_HITS     = 3      # hits needed ...
+WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
+WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
+WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
+
+# --- NEIGHBOR-AWARE SIDE GAZE ---
+# A left/right head turn only counts as "looking at another student" if some
+# other student sits on that side, in roughly the same row.  Distances are in
+# units of the turning student's shoulder width (image left = "LOOKING LEFT").
+GAZE_REQUIRE_NEIGHBOR = False   # r8: off by default; turn on only after testing on real footage
+GAZE_NEIGHBOR_MIN_DX  = 0.6   # neighbor must be at least this far to the side
+GAZE_NEIGHBOR_MAX_DX  = 6.0   # ...and no farther than this
+GAZE_NEIGHBOR_ROW_MULT = 2.0  # max vertical offset between shoulder centers
+
 # --- POSE MODEL INFERENCE SETTINGS ---
 # A higher NMS IoU / confidence cuts down on the model emitting two
 # overlapping skeletons for one person (the root cause of "ghost" students).
@@ -84,6 +120,12 @@ STATIC_CLOCK_SEC       = 8.0
 STATIC_CLOCK_RADIUS_PX = 60
 STATIC_CLOCK_MOVE_PX   = 35
 WRIST_PROXIMITY_PX     = 150
+WRIST_CROP_MAX_WRIST_DIST  = 0.6   # phone centre must be within this x shoulder width of the wrist
+WRIST_CROP_STATIC_SEC      = 6.0   # a wrist-crop 'phone' this still ...
+WRIST_CROP_STATIC_MOVE_PX  = 8     # ... (moves less than this) is furniture
+HELD_PHONE_WRIST_MULT      = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
+STATIC_PHONE_SEC       = 10.0   # a full-frame 'phone' that never moves this long is furniture,
+                                # unless a visible wrist is within WRIST_PROXIMITY_PX of it
 
 # --- CAMERA-BUMP DETECTION ---
 CAMERA_BUMP_RATIO        = 0.6
@@ -108,11 +150,19 @@ TRACK_MIN_AGE_SEC = 1.0
 REACH_ZONE_RADIUS_MULTIPLIER    = 1.5
 REACH_EXTENSION_MULTIPLIER      = 1.6
 REACH_PROGRESS_MIN              = 0.35
-REACH_SAME_ROW_MULTIPLIER       = 2.0    # max vertical offset between shoulder centers, x avg shoulder width
+REACH_SAME_ROW_MULTIPLIER       = 1.0    # max vertical offset between shoulder centers, x avg shoulder width
 REACH_MAX_PAIR_DIST_MULTIPLIER  = 8.0    # generous: the extension test does the real filtering
-REACH_DURATION_THRESHOLD        = 0.5
+REACH_DURATION_THRESHOLD        = 1.0
 REACH_GRACE_SEC                 = 0.4    # tolerate a dropped wrist keypoint for this long
 REACH_WRIST_CONF                = 0.3    # wrists are blurry mid-motion; accept lower confidence
+# Shoulder-width ratio between the two students must fall in this band, or
+# they are at different depths (different rows) and are never paired.
+REACH_DEPTH_RATIO_MIN = 0.75
+REACH_DEPTH_RATIO_MAX = 1.33
+# Only students who are really side by side (shoulder centers at least this many
+# average shoulder widths apart horizontally) can hand something to each other.
+# Someone sitting directly behind another student has almost no horizontal gap.
+REACH_MIN_SIDE_GAP_MULTIPLIER = 1.2
 
 # --- HEAD-POSE ROBUSTNESS ---
 # Looking DOWN at a paper shifts the nose sideways relative to the shoulder
@@ -125,7 +175,7 @@ PITCH_DOWN_DELTA = 0.30
 # Twisting / leaning tilts the shoulder line and inflates the pitch number, so
 # without this override a genuine turn (yaw ~ -1.3 in testing) was being
 # excused as "looking down".  Only MODERATE readings can be excused.
-HEAD_TURN_STRONG_RATIO = 1.0
+HEAD_TURN_STRONG_RATIO = 0.7   # was 1.0; tune on the 'looking at another student' clips
 # A gaze timer survives a dip below threshold this long (a blink, one noisy
 # frame) instead of restarting from zero.
 GAZE_GRACE_SEC = 0.8
@@ -202,6 +252,8 @@ def add_camera(source, cam_type, label=None):
         "thread":       None,
         # --- smartwatch static-position tracker ---
         "static_objects": {},
+        "static_phones":  {},
+        "static_wc":      {},
         # --- camera-bump detection ---
         "last_bump_time": 0.0,
         # --- track-age gate ---
@@ -259,7 +311,7 @@ PER_TRACK_KEYS = ("gaze_timers", "turn_history", "baseline_ratio", "calibration_
 
 def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
-    for key in PER_TRACK_KEYS + ("interaction_timers", "reach_timers", "static_objects"):
+    for key in PER_TRACK_KEYS + ("interaction_timers", "reach_timers", "static_objects", "static_phones", "static_wc"):
         entry[key].clear()
 
 
@@ -330,6 +382,142 @@ def scan_local_cameras(max_index=4):
 
 # Pre-register one default local camera so the dashboard is not empty.
 add_camera(0, "local", label="cam1")
+
+
+def _neighbor_in_direction(turn, track_id, candidates, kept_idx):
+    """True if another (non-ghost) student sits on the side this student is
+    turned toward, in roughly the same row.  `turn` is 'LOOKING LEFT' or
+    'LOOKING RIGHT' (image-left / image-right, matching the yaw sign)."""
+    if not GAZE_REQUIRE_NEIGHBOR or turn not in ("LOOKING LEFT", "LOOKING RIGHT"):
+        return True
+    me = next((c for c in candidates
+               if c["track_id"] == track_id and c["idx"] in kept_idx), None)
+    if me is None:
+        return True
+    direction = -1 if turn == "LOOKING LEFT" else 1
+    for c in candidates:
+        if c["idx"] not in kept_idx or c["track_id"] == track_id:
+            continue
+        dx = (c["center"][0] - me["center"][0]) * direction
+        dy = abs(c["center"][1] - me["center"][1])
+        if (GAZE_NEIGHBOR_MIN_DX * me["width"] <= dx <= GAZE_NEIGHBOR_MAX_DX * me["width"]
+                and dy <= GAZE_NEIGHBOR_ROW_MULT * me["width"]):
+            return True
+    return False
+
+
+def _wrist_crop_sample(entry, camera_id, frame, students, now):
+    """One zoomed-in phone pass over every established student's wrists."""
+    h, w = frame.shape[:2]
+    crops, meta = [], []
+    for s in students:
+        tid = s["track_id"]
+        if now - entry["track_first_seen"].get(tid, now) < TRACK_MIN_AGE_SEC:
+            continue
+        half = int(max(WRIST_CROP_MIN_HALF_PX, s["shoulder_width"] * WRIST_CROP_SCALE / 2.0))
+        for wrist in (s["l_wrist"], s["r_wrist"]):
+            if wrist is None:
+                continue
+            x1, y1 = max(0, wrist[0] - half), max(0, wrist[1] - half)
+            x2, y2 = min(w, wrist[0] + half), min(h, wrist[1] + half)
+            if x2 - x1 < 16 or y2 - y1 < 16:
+                continue
+            crops.append(frame[y1:y2, x1:x2].copy())
+            meta.append((tid, x1, y1, wrist, s["shoulder_width"]))
+            if len(crops) >= WRIST_CROP_MAX_CROPS:
+                break
+        if len(crops) >= WRIST_CROP_MAX_CROPS:
+            break
+    if not crops:
+        return
+
+    results = entry["object_model"](crops, imgsz=WRIST_CROP_IMGSZ,
+                                    conf=WRIST_CROP_CONF, classes=[67], verbose=False)
+
+    best = {}   # track_id -> strongest phone detection this pass (full-frame coords)
+    for (tid, ox, oy, wpt, sw), r in zip(meta, results):
+        for box in r.boxes:
+            conf = float(box.conf[0])
+            bx1, by1, bx2, by2 = map(int, box.xyxy[0])
+            ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
+            if math.hypot(ccx - wpt[0], ccy - wpt[1]) > WRIST_CROP_MAX_WRIST_DIST * sw:
+                continue   # too far from the hand to be held in it (furniture at the crop edge)
+            if tid not in best or conf > best[tid]["confidence"]:
+                best[tid] = {
+                    "name":       "CELL PHONE",
+                    "confidence": conf,
+                    "center":     (ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2),
+                    "bbox":       (ox + bx1, oy + by1, ox + bx2, oy + by2),
+                }
+
+    hits      = entry.setdefault("_wc_hits", {})
+    confirmed = entry.setdefault("_wc_confirmed", {})
+
+    for tid, det in best.items():
+        recent = [t for t in hits.get(tid, []) if now - t <= WRIST_CROP_WINDOW_SEC]
+        recent.append(now)
+        hits[tid] = recent
+        if len(recent) >= WRIST_CROP_MIN_HITS:
+            if tid not in confirmed:
+                print(f"[{camera_id}] ID {tid}: phone in hand (wrist crop, "
+                      f"{det['confidence']*100:.0f}%)")
+            confirmed[tid] = {"det": det, "until": now + WRIST_CROP_HOLD_SEC}
+
+    for tid in list(hits):
+        if tid not in best:
+            hits[tid] = [t for t in hits[tid] if now - t <= WRIST_CROP_WINDOW_SEC]
+            if not hits[tid]:
+                del hits[tid]
+
+
+def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_detections):
+    """Adds confirmed wrist-crop phones to `object_detections` (in place).
+    Never raises: a failure here must not stop the detection loop."""
+    if (not WRIST_CROP_ENABLED or not DETECTION_ENABLED["phone"]
+            or entry.get("object_model") is None):
+        return
+    try:
+        confirmed = entry.setdefault("_wc_confirmed", {})
+        if now - entry.get("_wc_last", 0.0) >= WRIST_CROP_INTERVAL_SEC:
+            entry["_wc_last"] = now
+            _wrist_crop_sample(entry, camera_id, clean_frame, students, now)
+
+        for tid in [t for t, c in confirmed.items() if c["until"] < now]:
+            del confirmed[tid]
+
+        conf_items = list(confirmed.items())
+        wc_static = _check_static_clocks(
+            entry, [c["det"]["center"] for _, c in conf_items], now,
+            store="static_wc", static_sec=WRIST_CROP_STATIC_SEC,
+            move_px=WRIST_CROP_STATIC_MOVE_PX)
+        for k, (tid, c) in enumerate(conf_items):
+            if k in wc_static:
+                continue   # has not moved: furniture, not a phone in a hand
+            det = c["det"]
+            dup = next((d for d in object_detections
+                        if d["name"] == "CELL PHONE"
+                        and math.hypot(d["center"][0] - det["center"][0],
+                                       d["center"][1] - det["center"][1]) < WRIST_CROP_DEDUP_PX),
+                       None)
+            if dup is not None:
+                dup.setdefault("track_id", tid)
+                dup["confidence"] = max(dup["confidence"], det["confidence"])
+            else:
+                object_detections.append(dict(det, track_id=tid))
+    except Exception as e:
+        print(f"[{camera_id}] Wrist-crop phone error: {e}")
+
+
+def _phone_in_hand(det, students):
+    """True if any student's wrist is within HELD_PHONE_WRIST_MULT x their
+    shoulder width of the detection's centre."""
+    cx, cy = det["center"]
+    for s in students:
+        lim = s["shoulder_width"] * HELD_PHONE_WRIST_MULT
+        for wr in (s["l_wrist"], s["r_wrist"]):
+            if wr is not None and math.hypot(cx - wr[0], cy - wr[1]) < lim:
+                return True
+    return False
 
 
 def calculate_angle(p1, p2):
@@ -419,11 +607,13 @@ def _find_reaching_wrist(reacher, target, same_row):
 # ==========================================
 # SMARTWATCH STATIC-POSITION TRACKER (Guard A)
 # ==========================================
-def _check_static_clocks(entry, centers, now):
+def _check_static_clocks(entry, centers, now, store="static_objects",
+                        static_sec=STATIC_CLOCK_SEC,
+                        move_px=STATIC_CLOCK_MOVE_PX):
     """Update the per-camera tracker for clock bbox centres and return the
     set of indices (into `centers`) suppressed because the object has sat in
     the same spot for >= STATIC_CLOCK_SEC (almost certainly a wall clock)."""
-    tracker  = entry["static_objects"]
+    tracker  = entry.setdefault(store, {})
     NEXT_KEY = "__next"
     next_id  = tracker.get(NEXT_KEY, 0)
 
@@ -445,10 +635,10 @@ def _check_static_clocks(entry, centers, now):
         if best_id is not None:
             td = tracker[best_id]
             td["last_seen"] = now
-            if best_dist > STATIC_CLOCK_MOVE_PX:
+            if best_dist > move_px:
                 td["static_since"] = now
                 td["center"]       = center
-            elif now - td["static_since"] >= STATIC_CLOCK_SEC:
+            elif now - td["static_since"] >= static_sec:
                 suppressed.add(idx)
         else:
             tracker[next_id] = {"center": center, "static_since": now, "last_seen": now}
@@ -519,6 +709,7 @@ def _detection_loop(camera_id):
                     continue
 
             h, w, _ = frame.shape
+            clean_frame = frame.copy()   # un-annotated copy for the wrist-crop pass
             current_time = time.time()
 
             gaze_timers      = entry["gaze_timers"]
@@ -567,7 +758,8 @@ def _detection_loop(camera_id):
                     for box in r.boxes:
                         cls_id     = int(box.cls[0])
                         confidence = float(box.conf[0])
-                        if cls_id in PROHIBITED_CLASSES and confidence > 0.45:
+                        if (cls_id in PROHIBITED_CLASSES and confidence > 0.45
+                                and DETECTION_ENABLED["phone" if cls_id == 67 else "watch"]):
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
                             object_detections.append({
                                 "name":       PROHIBITED_CLASSES[cls_id],
@@ -821,7 +1013,16 @@ def _detection_loop(camera_id):
                             last_turn[track_id] = person_turn
                         active_ids.append(track_id)
 
-                        if person_turn not in ("FORWARD", "CALIBRATING", "LOOKING DOWN"):
+                        gaze_candidate = (DETECTION_ENABLED["gaze"]
+                                          and person_turn not in ("FORWARD", "CALIBRATING", "LOOKING DOWN")
+                                          and _neighbor_in_direction(person_turn, track_id,
+                                                                     candidates, kept_idx))
+                        if (DETECTION_ENABLED["gaze"] and not gaze_candidate
+                                and person_turn in ("LOOKING LEFT", "LOOKING RIGHT")):
+                            cv2.putText(frame, "turn ignored: no neighbor",
+                                        (shoulder_center[0] - 70, max(20, shoulder_center[1] - 40)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                        if gaze_candidate:
                             entry["gaze_lost"].pop(track_id, None)
                             if track_id not in gaze_timers:
                                 gaze_timers[track_id] = current_time
@@ -885,6 +1086,10 @@ def _detection_loop(camera_id):
                 for key in PER_TRACK_KEYS:
                     entry[key].pop(tid, None)
 
+            # 2.4 WRIST-CROP PHONE PASS: small phones held in hands
+            _merge_wrist_phones(entry, camera_id, clean_frame, students,
+                                current_time, object_detections)
+
             established_ids = {tid for tid, seen in track_first_seen.items()
                                if current_time - seen >= TRACK_MIN_AGE_SEC}
 
@@ -912,11 +1117,25 @@ def _detection_loop(camera_id):
             clock_centers = [d["center"] for _, d in clock_dets]
             suppressed    = _check_static_clocks(entry, clock_centers, current_time)
 
+            # Stationary "phones" (seat-number plates etc.).  Wrist-crop detections carry
+            # a track_id and are exempt.
+            phone_dets = [(i, d) for i, d in enumerate(object_detections)
+                          if d["name"] == "CELL PHONE" and d.get("track_id") is None]
+            phone_sup  = _check_static_clocks(entry, [d["center"] for _, d in phone_dets],
+                                               current_time, store="static_phones",
+                                               static_sec=STATIC_PHONE_SEC)
+            static_phone_idx = {phone_dets[k][0] for k in phone_sup}
+
             accepted_detections = []
             for i, det in enumerate(object_detections):
                 x1, y1, x2, y2 = det["bbox"]
 
                 if det["name"] != "SMARTWATCH":
+                    if i in static_phone_idx and not _phone_in_hand(det, students):
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
+                        cv2.putText(frame, "STATIC OBJECT (suppressed)", (x1, max(y1 - 8, 12)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (70, 70, 70), 1)
+                        continue
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                     cv2.putText(frame, f"CELL PHONE ({det['confidence']*100:.0f}%)",
                                 (x1, max(y1 - 10, 20)),
@@ -979,6 +1198,8 @@ def _detection_loop(camera_id):
                         nearest_dist    = d
                         nearest_student = s
                 violating_track_id = nearest_student["track_id"] if nearest_student else None
+                if best_det.get("track_id") is not None:   # found in a wrist crop
+                    violating_track_id = best_det["track_id"]
 
             # ==========================================
             # 4. INTERACTION & DESK LEANING / REACH DETECTION
@@ -1002,38 +1223,7 @@ def _detection_loop(camera_id):
                     if dist < min(s1["shoulder_width"], s2["shoulder_width"]) * DUPLICATE_DIST_MULTIPLIER:
                         continue
 
-                    proximity_limit = avg_shoulder_w * PROXIMITY_MULTIPLIER
-                    excessive_lean  = (s1["spine_tilt"] > SPINE_TILT_THRESHOLD_DEG or
-                                       s2["spine_tilt"] > SPINE_TILT_THRESHOLD_DEG)
-                    is_close = (dist < proximity_limit or
-                                (dist < proximity_limit * 1.3 and excessive_lean))
-
-                    pair_key = frozenset({s1["track_id"], s2["track_id"]})
-
-                    if is_close:
-                        active_pairs.append(pair_key)
-                        if pair_key not in pair_timers:
-                            pair_timers[pair_key] = current_time
-                        elapsed = current_time - pair_timers[pair_key]
-
-                        if elapsed >= INTERACTION_DURATION_THRESHOLD:
-                            interaction_violation = True
-                            if not violation_reason:
-                                violation_reason     = "STUDENT_INTERACTION"
-                                violation_confidence = 0.90
-                                violating_track_id   = s1["track_id"]
-
-                            cv2.line(frame, s1["shoulder_center"], s2["shoulder_center"],
-                                     (0, 0, 255), 3)
-                            mid_pt = (
-                                (s1["shoulder_center"][0] + s2["shoulder_center"][0]) // 2,
-                                (s1["shoulder_center"][1] + s2["shoulder_center"][1]) // 2,
-                            )
-                            cv2.putText(frame, "INTERACTION",
-                                        (mid_pt[0] - 45, mid_pt[1] - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    else:
-                        pair_timers.pop(pair_key, None)
+                    # (student-interaction / proximity detection removed: gaze + reach cover it)
 
                     # --- Note-passing / reach check, both directions. ---
                     if dist > avg_shoulder_w * REACH_MAX_PAIR_DIST_MULTIPLIER:
@@ -1041,6 +1231,12 @@ def _detection_loop(camera_id):
                     same_row = abs(s1["shoulder_center"][1] - s2["shoulder_center"][1]) \
                                < avg_shoulder_w * REACH_SAME_ROW_MULTIPLIER
 
+                    depth_ratio = s1["shoulder_width"] / max(1.0, s2["shoulder_width"])
+                    side_gap = abs(s1["shoulder_center"][0] - s2["shoulder_center"][0])
+                    if (not same_row
+                            or not (REACH_DEPTH_RATIO_MIN <= depth_ratio <= REACH_DEPTH_RATIO_MAX)
+                            or side_gap < avg_shoulder_w * REACH_MIN_SIDE_GAP_MULTIPLIER):
+                        continue   # different row / depth: 2D geometry can't tell a hand-off from overlap
                     for reacher, target in ((s1, s2), (s2, s1)):
                         reach_key   = (reacher["track_id"], target["track_id"])
                         reach_wrist = _find_reaching_wrist(reacher, target, same_row)
@@ -1052,7 +1248,7 @@ def _detection_loop(camera_id):
                             reach_timers[reach_key]["last"] = current_time
                             r_elapsed = current_time - reach_timers[reach_key]["start"]
 
-                            if r_elapsed >= REACH_DURATION_THRESHOLD:
+                            if r_elapsed >= REACH_DURATION_THRESHOLD and DETECTION_ENABLED["reach"]:
                                 reach_violation = True
                                 if not violation_reason:
                                     violation_reason     = "REACHING_NEIGHBOR_ZONE"
@@ -1328,6 +1524,7 @@ def get_violations():
 def start_monitoring():
     global monitoring_active
     monitoring_active = True
+    print(f"[session] monitoring started, rules: {DETECTION_ENABLED}")
     return jsonify({"status": "started"})
 
 
@@ -1455,6 +1652,19 @@ def serve_recording(filepath):
     return send_from_directory(RECORDINGS_FOLDER, filepath, conditional=True)
 
 
+@app.route('/settings', methods=['GET', 'POST'])
+def settings_route():
+    """Read or change which detection rules are active.  Changes are logged
+    with the username so a reviewer can see why something was not flagged."""
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        for k in list(DETECTION_ENABLED):
+            if k in data:
+                DETECTION_ENABLED[k] = bool(data[k])
+        print(f"[settings] {session.get('username', 'unknown')} set rules: {DETECTION_ENABLED}")
+    return jsonify(DETECTION_ENABLED)
+
+
 @app.route('/system_stats')
 def system_stats():
     try:
@@ -1482,6 +1692,7 @@ def system_stats():
         "interaction":      interaction_count,
         "reach":            reach_count,
         "gaze":             gaze_count,
+        "rules":            dict(DETECTION_ENABLED),
         "session_id":       CURRENT_SESSION,
     })
 
