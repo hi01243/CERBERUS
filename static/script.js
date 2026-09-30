@@ -314,9 +314,9 @@ async function loadStats() {
 
         document.getElementById("totalAlerts").innerText = data.total_violations ?? 0;
         document.getElementById("phoneAlerts").innerText = data.phone ?? 0;
-        document.getElementById("interactionAlerts").innerText = data.interaction ?? 0;
         document.getElementById("reachAlerts").innerText = data.reach ?? 0;
         document.getElementById("gazeAlerts").innerText = data.gaze ?? 0;
+        if (data.rules) syncRules(data.rules);
 
         const statusLabel = document.getElementById("monitorStatus");
         const statusDot = document.getElementById("statusDot");
@@ -481,3 +481,57 @@ document.addEventListener("DOMContentLoaded", () => {
     setInterval(loadStats, 2000);
     setInterval(loadViolations, 2500);
 });
+
+
+// ==========================================
+// DETECTION RULE SWITCHES
+// ==========================================
+// Checkboxes in .rules-panel <-> POST /settings.  syncRules() keeps them
+// matched to the server (called from loadStats), but stays out of the way
+// while a change is being saved so the box doesn't flicker back.
+
+let ruleSaving = false;
+
+function syncRules(rules) {
+    if (ruleSaving || !rules) return;
+    document.querySelectorAll('.rule-toggle input[data-rule]').forEach(box => {
+        const want = !!rules[box.dataset.rule];
+        if (box.checked !== want) box.checked = want;
+    });
+}
+
+async function initRuleToggles() {
+    try {
+        const res = await fetch('/settings');
+        if (res.ok) syncRules(await res.json());
+    } catch (err) {
+        console.error("Failed to load rules:", err);
+    }
+
+    document.querySelectorAll('.rule-toggle input[data-rule]').forEach(box => {
+        box.addEventListener('change', async () => {
+            const rule = box.dataset.rule;
+            const wanted = box.checked;
+            ruleSaving = true;
+            try {
+                const res = await fetch('/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ [rule]: wanted })
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                ruleSaving = false;
+                syncRules(data);
+            } catch (err) {
+                console.error("Failed to save rule:", err);
+                box.checked = !wanted;   // revert; the server didn't take it
+                alert("Could not change that rule -- check the console.");
+            } finally {
+                ruleSaving = false;
+            }
+        });
+    });
+}
+
+document.addEventListener("DOMContentLoaded", initRuleToggles);

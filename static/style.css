@@ -670,3 +670,32 @@ body {
     margin-bottom: 4px;
 }
 .meta-row strong { color: var(--text-high); }
+
+
+/* ---- detection rule switches ---- */
+.rules-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 18px;
+    margin: 14px 0 4px;
+    padding: 10px 14px;
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    border-radius: 10px;
+}
+.rules-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    opacity: 0.7;
+}
+.rule-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    user-select: none;
+}
+.rule-toggle input { cursor: pointer; }
+.rule-toggle small { opacity: 0.6; }

@@ -72,10 +72,6 @@
                 <span class="stat-value text-red" id="phoneAlerts">0</span>
             </div>
 
-            <div class="card stat-card">
-                <span class="card-label">Desk Collab / Leaning</span>
-                <span class="stat-value text-blue" id="interactionAlerts">0</span>
-            </div>
 
             <div class="card stat-card">
                 <span class="card-label">Reaching / Note Passing</span>
@@ -127,6 +123,17 @@
                      a tile appears here automatically. -->
                 <div class="camera-grid" id="cameraGrid">
                     <div class="empty-state">No cameras registered yet.</div>
+                </div>
+
+                <!-- Detection rules: which checks are active for this exam.  A regular
+                     watch or an allowed calculator looks like a smartwatch / phone to
+                     YOLO, so switch those off when the exam allows them. -->
+                <div class="rules-panel">
+                    <span class="rules-title">DETECTION RULES</span>
+                    <label class="rule-toggle"><input type="checkbox" data-rule="phone" checked> Phones <small>(also flags calculators)</small></label>
+                    <label class="rule-toggle"><input type="checkbox" data-rule="watch"> Watches</label>
+                    <label class="rule-toggle"><input type="checkbox" data-rule="reach" checked> Reaching / note passing</label>
+                    <label class="rule-toggle"><input type="checkbox" data-rule="gaze" checked> Side gaze</label>
                 </div>
 
                 <div class="controls-toolbar">
@@ -184,7 +191,6 @@
                 <div class="filter-group">
                     <button class="filter-btn active" data-filter="ALL">ALL</button>
                     <button class="filter-btn" data-filter="OBJECT">DEVICES</button>
-                    <button class="filter-btn" data-filter="INTERACTION">COLLAB</button>
                     <button class="filter-btn" data-filter="REACH">REACHING</button>
                     <button class="filter-btn" data-filter="GAZE">GAZE</button>
                 </div>
