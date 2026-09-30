@@ -36,12 +36,20 @@
   #filters { display:flex; gap:6px; padding:0 20px 12px; }
   #filters button { font-size:12px; padding:4px 10px; }
   #filters button.active { border-color:var(--flag); color:var(--flag); }
+  .review-aside { display:flex; flex-direction:column; gap:14px; min-width:0; }
+  .review-aside h2 { margin:0 0 8px; font-size:13px; }
+  #recording-list { display:flex; flex-direction:column; gap:5px; max-height:28vh; overflow:auto; }
+  .recording-item { display:flex; justify-content:space-between; align-items:center; gap:10px; width:100%; text-align:left; }
+  .recording-item.active { border-color:var(--flag); color:var(--flag); }
+  .recording-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .recording-size { flex:none; color:var(--muted); font-size:11px; }
+  #list { max-height:52vh; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Incident review</h1>
-  <div><button id="refresh">Refresh</button> <a href="/">Dashboard</a></div>
+  <h1>Session: {{ session_id }}</h1>
+  <div><button id="refresh">Refresh</button> <a href="/monitor">Monitor</a> <a href="/">Sessions</a></div>
 </header>
 <div id="filters">
   <button class="active" data-filter="all">All</button>
@@ -54,10 +62,20 @@
     <div id="timeline" aria-label="Incidents in this recording"></div>
     <p id="note">Select an incident to play its recording from 5 seconds before the alert.</p>
   </section>
-  <section id="list" aria-label="Incidents"></section>
+  <aside class="review-aside">
+    <section>
+      <h2>Recordings</h2>
+      <div id="recording-list" aria-label="Session recordings"></div>
+    </section>
+    <section>
+      <h2>Flags</h2>
+      <div id="list" aria-label="Incidents"></div>
+    </section>
+  </aside>
 </main>
 <script>
 const LEAD_IN = 5;
+const sessionId = {{ session_id|tojson }};
 // Incidents from different cameras within this many seconds of each other,
 // of the same violation type, are almost certainly the same real event
 // seen from two angles -- not two separate cheating incidents. They're
@@ -67,6 +85,7 @@ const GROUP_WINDOW_SEC = 5;
 
 const player = document.getElementById('player');
 const listEl = document.getElementById('list');
+const recordingListEl = document.getElementById('recording-list');
 const timeline = document.getElementById('timeline');
 const note = document.getElementById('note');
 let incidents = [], groups = [], current = null, listFilter = 'all';
@@ -75,13 +94,48 @@ const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2,
 const label = t => t.replaceAll('_', ' ').toLowerCase();
 
 async function load() {
-  incidents = await (await fetch('/incidents')).json();
+  const query = `session_id=${encodeURIComponent(sessionId)}`;
+  const [incidentResponse, recordingResponse] = await Promise.all([
+    fetch(`/incidents?${query}`), fetch(`/session_files?${query}`)
+  ]);
+  incidents = await incidentResponse.json();
+  const recordings = await recordingResponse.json();
+  renderRecordings(recordings);
   render();
   // Deep link from the dashboard: /review?thumb=<evidence image path>
   const want = new URLSearchParams(location.search).get('thumb');
   if (want && !player.getAttribute('src')) {
     const hit = incidents.find(i => i.thumb === want);
     if (hit) openIncident(hit);
+  }
+}
+
+function renderRecordings(recordings) {
+  recordingListEl.replaceChildren();
+  if (!recordings.length) {
+    recordingListEl.textContent = 'No recordings in this session.';
+    return;
+  }
+  for (const recording of recordings) {
+    const button = document.createElement('button');
+    button.className = 'recording-item';
+    button.type = 'button';
+    const name = document.createElement('span');
+    name.className = 'recording-name';
+    name.textContent = recording.name;
+    const size = document.createElement('span');
+    size.className = 'recording-size';
+    size.textContent = `${(recording.size / 1024 / 1024).toFixed(1)} MB`;
+    button.append(name, size);
+    button.addEventListener('click', () => {
+      document.querySelectorAll('.recording-item').forEach(item => item.classList.remove('active'));
+      button.classList.add('active');
+      current = null;
+      player.src = recording.url;
+      note.textContent = 'Select a flag to jump to its point in this recording.';
+      drawTimeline();
+    });
+    recordingListEl.append(button);
   }
 }
 

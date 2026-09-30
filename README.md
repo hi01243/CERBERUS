@@ -48,23 +48,34 @@ The YOLO weights (`yolo11n-pose.pt`, `yolo11n.pt`) are downloaded automatically 
 python app.py
 ```
 
-Open <http://127.0.0.1:5000>, sign up (an invite code is required, see `auth.py`), and log in. The console prints the build ID on startup so you can confirm which version is running.
+Open <http://127.0.0.1:5000>. The console prints the build ID and, unless `CERBERUS_INVITE_CODE` is set, the signup invite code on startup.
 
 | Environment variable | Purpose |
 |---|---|
 | `CERBERUS_SECRET_KEY` | Keeps logins valid across restarts (otherwise a random key is generated each run) |
 | `CERBERUS_HOST` | Set to `0.0.0.0` to reach the dashboard from other devices (default is localhost only) |
+| `CERBERUS_INVITE_CODE` | Optional signup code override; otherwise CERBERUS generates a code once and stores it in `users.db` |
+
+### Authentication
+
+1. Start CERBERUS with `python app.py` and keep the console available. The generated invite code is saved in `users.db`, so it stays the same across restarts. To choose a code yourself, set `CERBERUS_INVITE_CODE` before starting the app.
+2. Open `/signup`, enter a username (3-32 letters, numbers, `_`, `.`, or `-`), a password (at least 8 characters), and the invite code. Signup does not require an email address or SMTP configuration.
+3. Optionally check **Enable authenticator MFA** during signup. After creating the account, add the displayed setup key to an authenticator app and enter its current six-digit code to enable MFA. You can also enable it later from **Enable faster MFA** on the sessions page.
+4. Sign in using your username and password. If MFA is enabled, enter the current six-digit authenticator code when prompted. You can manage or disable MFA from the sessions page; disabling it requires a current authenticator code.
+5. Deleting a session requires MFA to be enabled, a current authenticator code, and typing the exact session name. Pause monitoring before deleting the active session. **RESET SESSION** uses the same MFA protection.
+
+Keep access to your authenticator app and setup key. There is no email-based MFA recovery flow. Accounts created by an earlier email-based version can use that email address as their username.
 
 ## Using it
 
-1. **Add a camera** on the dashboard: scan for local cameras, or enter an IP camera URL (for IP Webcam use `http://<phone-ip>:8080/video`), an RTSP URL, or a video file path. Video files loop, which is handy for demos.
-2. Click **Use** on the camera tile to start it. Cameras can be paused or removed at any time.
-3. Set the **Detection Rules** for this exam.
-4. Click **ARM MONITORING**. Students are calibrated during their first couple of seconds on camera, so ask them to sit normally.
-5. Watch the live log and evidence gallery. **PAUSE SYSTEM** stops monitoring.
-6. Afterwards open **REVIEW RECORDINGS**: a video player with a marker for each incident. Reviewers can dismiss false positives without deleting the evidence.
-7. Use **New** next to the session name to start a separate session for each exam.
-8. **RESET SESSION** permanently deletes that session's recordings, thumbnails and database rows. It requires monitoring to be paused and the phrase `DELETE ALL DATA` to be typed.
+1. The home page lists sessions with their recording and flag counts. Open a session to browse its videos and incidents, or create a new session and start monitoring.
+2. **Add a camera** on the monitor page: scan for local cameras, or enter an IP camera URL (for IP Webcam use `http://<phone-ip>:8080/video`), an RTSP URL, or a video file path. Video files loop, which is handy for demos.
+3. Click **Use** on the camera tile to start it. Cameras can be paused or removed at any time.
+4. Set the **Detection Rules** for this exam.
+5. Click **ARM MONITORING**. Students are calibrated during their first couple of seconds on camera, so ask them to sit normally.
+6. Watch the live log and evidence gallery. **PAUSE SYSTEM** stops monitoring.
+7. Afterwards open **REVIEW RECORDINGS**: a video player with a marker for each incident. Reviewers can dismiss false positives without deleting the evidence.
+8. Delete a session from the sessions page. Deletion requires authenticator MFA and typing the exact session name. The active session must be paused first. **RESET SESSION** uses the same MFA protection.
 
 ### Exam rules
 

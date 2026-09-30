@@ -45,6 +45,7 @@
                 <span class="meta-label">USER:</span>
                 <span class="meta-value">{{ session.get('username', '-') }}</span>
             </div>
+            <a href="/" class="tile-btn" style="text-decoration:none;">Sessions</a>
             <form action="/logout" method="post" style="display:inline;">
                 <button type="submit" class="tile-btn" title="Sign out">Sign out</button>
             </form>

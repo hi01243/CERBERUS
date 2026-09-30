@@ -16,11 +16,12 @@ import numpy as np
 # Database helper functions from database.py
 from database import init_db, log_violation, get_recent_violations, clear_violations
 from recording import (SessionRecorder, IncidentTracker, init_incident_db,
-                       list_incidents, clear_incidents, dismiss_incident,
+                       list_incidents, list_incident_sessions, clear_incidents, dismiss_incident,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
-from auth import init_auth_db, create_user, verify_user
+from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
+                  generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
 
-BUILD_ID = "2026-09-30-r13-wrist-gate"
+BUILD_ID = "2026-09-30-r15-username-mfa"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -1377,12 +1378,31 @@ def _require_login():
 def login():
     error = None
     if request.method == 'POST':
-        user = verify_user(request.form.get('username', ''), request.form.get('password', ''))
+        pending_user_id = session.get('pending_login_user_id')
+        if pending_user_id and request.form.get('step') == 'verify':
+            user = get_user_by_id(pending_user_id)
+            if user and verify_totp(user.get('totp_secret'), request.form.get('code')):
+                session.clear()
+                session['user_id'] = user['id']
+                session['username'] = user['username']
+                return redirect(url_for('index'))
+            error = 'Authenticator code is invalid or expired.'
+            return render_template('login.html', error=error, verification_username=session.get('pending_login_username'))
+
+        username = (request.form.get('username') or '').strip()
+        user = verify_user(username, request.form.get('password', ''))
         if user:
-            session['user_id']  = user['id']
+            if user.get('totp_secret'):
+                session.clear()
+                session['pending_login_user_id'] = user['id']
+                session['pending_login_username'] = user['username']
+                return render_template('login.html', verification_username=user['username'])
+            session.clear()
+            session['user_id'] = user['id']
             session['username'] = user['username']
             return redirect(url_for('index'))
-        error = "Incorrect username or password."
+        else:
+            error = 'Incorrect username or password.'
     return render_template('login.html', error=error)
 
 
@@ -1390,23 +1410,60 @@ def login():
 def signup():
     error = None
     if request.method == 'POST':
-        uid, error = create_user(
-            request.form.get('username', ''),
-            request.form.get('password', ''),
-            request.form.get('invite_code', ''),
-        )
-        if uid:
-            user = verify_user(request.form.get('username', ''), request.form.get('password', ''))
-            session['user_id']  = user['id']
-            session['username'] = user['username']
+        username = (request.form.get('username') or '').strip()
+        password = request.form.get('password', '')
+        user_id, error = create_user(username, password, request.form.get('invite_code', ''))
+        if user_id:
+            session.clear()
+            session['user_id'] = user_id
+            session['username'] = username
+            if request.form.get('enable_mfa') == '1':
+                return redirect(url_for('mfa_setup'))
             return redirect(url_for('index'))
     return render_template('signup.html', error=error)
 
 
+@app.route('/security/mfa', methods=['GET', 'POST'])
+def mfa_setup():
+    user_id = session.get('user_id')
+    active_secret = get_totp_secret(user_id)
+    error = None
+    pending_secret = session.get('pending_totp_secret')
+
+    if request.method == 'POST' and not active_secret:
+        if pending_secret and verify_totp(pending_secret, request.form.get('code')):
+            save_totp_secret(user_id, pending_secret)
+            session.pop('pending_totp_secret', None)
+            return redirect(url_for('index'))
+        error = 'That authenticator code is invalid or expired.'
+
+    if not active_secret and not pending_secret:
+        pending_secret = generate_totp_secret()
+        session['pending_totp_secret'] = pending_secret
+
+    return render_template('mfa_setup.html', enabled=bool(active_secret),
+                           secret=pending_secret, error=error)
+
+
+@app.route('/security/mfa/status')
+def mfa_status():
+    return jsonify({'enabled': bool(get_totp_secret(session.get('user_id')))})
+
+
+@app.route('/security/mfa/disable', methods=['POST'])
+def disable_mfa():
+    user_id = session.get('user_id')
+    secret = get_totp_secret(user_id)
+    data = request.get_json(silent=True) or {}
+    if not secret or not verify_totp(secret, data.get('code')):
+        return jsonify({'message': 'Authenticator code is invalid or expired.'}), 403
+    save_totp_secret(user_id, None)
+    return jsonify({'status': 'disabled'})
+
+
 @app.route('/logout', methods=['POST'])
 def logout():
-    session.pop('user_id', None)
-    session.pop('username', None)
+    session.clear()
     return redirect(url_for('login'))
 
 
@@ -1414,7 +1471,86 @@ def logout():
 
 @app.route('/')
 def index():
+    return render_template('sessions.html', current_session=CURRENT_SESSION,
+                           monitoring_active=monitoring_active,
+                           mfa_enabled=bool(get_totp_secret(session.get('user_id'))))
+
+
+@app.route('/monitor')
+def monitor():
     return render_template('index.html')
+
+
+def _valid_session_id(session_id):
+    return bool(session_id and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', session_id))
+
+
+def _session_recordings(session_id):
+    if not _valid_session_id(session_id):
+        return []
+    session_dir = os.path.join(RECORDINGS_FOLDER, session_id)
+    recordings = []
+    if not os.path.isdir(session_dir):
+        return recordings
+
+    for root, _dirs, files in os.walk(session_dir):
+        for name in files:
+            if not name.lower().endswith('.mp4') or name.lower().endswith('.tmp.mp4'):
+                continue
+            path = os.path.join(root, name)
+            relative_path = os.path.relpath(path, RECORDINGS_FOLDER).replace(os.sep, '/')
+            stat = os.stat(path)
+            recordings.append({
+                'name': name,
+                'path': relative_path,
+                'url': f'/recordings/{relative_path}',
+                'size': stat.st_size,
+                'modified': stat.st_mtime,
+            })
+    return sorted(recordings, key=lambda item: item['modified'], reverse=True)
+
+
+def _session_summaries():
+    summaries = {}
+    for row in list_incident_sessions():
+        session_id = row.get('session_id')
+        if _valid_session_id(session_id):
+            summaries[session_id] = {
+                'session_id': session_id,
+                'flag_count': row['flag_count'],
+                'updated_at': row['updated_at'],
+            }
+
+    if os.path.isdir(RECORDINGS_FOLDER):
+        for name in os.listdir(RECORDINGS_FOLDER):
+            if _valid_session_id(name) and os.path.isdir(os.path.join(RECORDINGS_FOLDER, name)):
+                summaries.setdefault(name, {'session_id': name, 'flag_count': 0, 'updated_at': None})
+
+    summaries.setdefault(CURRENT_SESSION, {
+        'session_id': CURRENT_SESSION, 'flag_count': 0, 'updated_at': None,
+    })
+    for summary in summaries.values():
+        summary['recordings'] = _session_recordings(summary['session_id'])
+        summary['recording_count'] = len(summary['recordings'])
+        if summary['recordings']:
+            summary['updated_at'] = max(
+                summary['updated_at'] or '',
+                datetime.fromtimestamp(summary['recordings'][0]['modified']).isoformat(timespec='seconds'),
+            )
+    return sorted(summaries.values(), key=lambda item: item['updated_at'] or '', reverse=True)
+
+
+@app.route('/sessions')
+def sessions_route():
+    return jsonify(_session_summaries())
+
+
+@app.route('/session_files')
+def session_files_route():
+    session_id = request.args.get('session_id', '')
+    if not _valid_session_id(session_id):
+        return jsonify({'message': 'Invalid session.'}), 400
+    return jsonify(_session_recordings(session_id))
 
 
 @app.route('/video_feed/<camera_id>')
@@ -1535,18 +1671,63 @@ def stop_monitoring():
     return jsonify({"status": "stopped"})
 
 
-# Reset Session permanently deletes every recording, thumbnail, and DB row
-# for the session, so the operator must TYPE a fixed phrase and the backend
-# independently checks it.
+# Session deletion requires TOTP MFA and an exact typed phrase.
 RESET_CONFIRM_PHRASE = "DELETE ALL DATA"
+
+
+def _delete_session_data(session_id):
+    global CURRENT_SESSION
+
+    deleting_current = session_id == CURRENT_SESSION
+    if deleting_current:
+        for entry in list(camera_registry.values()):
+            _finish_recording(entry)
+
+    clear_violations(session_id)
+    clear_incidents(session_id)
+    shutil.rmtree(os.path.join(RECORDINGS_FOLDER, session_id), ignore_errors=True)
+    shutil.rmtree(os.path.join(VIOLATION_FOLDER, session_id), ignore_errors=True)
+
+    if deleting_current:
+        for cam_id, entry in list(camera_registry.items()):
+            _clear_tracking_state(entry)
+        while True:
+            replacement = "SESSION_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(3)
+            if replacement != session_id and not os.path.exists(os.path.join(RECORDINGS_FOLDER, replacement)):
+                break
+        CURRENT_SESSION = replacement
+        os.makedirs(os.path.join(VIOLATION_FOLDER, CURRENT_SESSION), exist_ok=True)
+        for cam_id, entry in list(camera_registry.items()):
+            entry["recorder"] = SessionRecorder(CURRENT_SESSION, cam_id)
+            entry["incidents"] = IncidentTracker()
+    return CURRENT_SESSION
+
+
+@app.route('/sessions/<session_id>', methods=['DELETE'])
+def delete_session_route(session_id):
+    if not _valid_session_id(session_id):
+        return jsonify({"message": "Invalid session."}), 400
+    if monitoring_active and session_id == CURRENT_SESSION:
+        return jsonify({"message": "Pause monitoring before deleting the active session."}), 400
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != session_id:
+        return jsonify({"message": "Type the exact session name to confirm deletion."}), 400
+    secret = get_totp_secret(session.get('user_id'))
+    if not secret:
+        return jsonify({"message": "Enable authenticator MFA before deleting sessions.",
+                        "setup_mfa": True}), 403
+    if not verify_totp(secret, data.get("code")):
+        return jsonify({"message": "Authenticator code is invalid or expired."}), 403
+
+    print(f"[session] {session.get('username', 'unknown')} deleted session '{session_id}'")
+    replacement = _delete_session_data(session_id)
+    return jsonify({"status": "deleted", "session_id": session_id,
+                    "current_session": replacement})
 
 
 @app.route('/reset_session', methods=['POST'])
 def reset_session():
-    """Deletes all logged violations, incidents, recordings, and evidence
-    photos for the current session, and clears in-memory tracking state for
-    every registered camera.  Requires monitoring to be paused first, and
-    the exact confirmation phrase in the request body."""
+    """Deletes the current session after TOTP and phrase confirmation."""
     global monitoring_active
 
     if monitoring_active:
@@ -1561,25 +1742,24 @@ def reset_session():
             "status":  "error",
             "message": f'Type "{RESET_CONFIRM_PHRASE}" to confirm this cannot be undone.',
         }), 400
+    secret = get_totp_secret(session.get('user_id'))
+    if not secret:
+        return jsonify({
+            "status": "error",
+            "message": "Enable authenticator MFA before deleting session records.",
+            "setup_mfa": True,
+        }), 403
+    if not verify_totp(secret, data.get('totp_code')):
+        return jsonify({
+            "status": "error",
+            "message": "Authenticator code is invalid or expired.",
+        }), 403
 
-    print(f"[session] {session.get('username', 'unknown')} reset session '{CURRENT_SESSION}'")
-
-    for _entry in list(camera_registry.values()):
-        _finish_recording(_entry)
-
-    clear_violations(CURRENT_SESSION)
-    clear_incidents(CURRENT_SESSION)
-    shutil.rmtree(os.path.join(RECORDINGS_FOLDER, CURRENT_SESSION), ignore_errors=True)
-
-    session_dir = os.path.join(VIOLATION_FOLDER, CURRENT_SESSION)
-    if os.path.isdir(session_dir):
-        shutil.rmtree(session_dir)
-
-    for cam_id, entry in list(camera_registry.items()):
-        os.makedirs(os.path.join(session_dir, cam_id), exist_ok=True)
-        _clear_tracking_state(entry)
-
-    return jsonify({"status": "reset", "session_id": CURRENT_SESSION})
+    deleted_session = CURRENT_SESSION
+    print(f"[session] {session.get('username', 'unknown')} reset session '{deleted_session}'")
+    replacement = _delete_session_data(deleted_session)
+    return jsonify({"status": "reset", "session_id": deleted_session,
+                    "current_session": replacement})
 
 
 # ==========================================
@@ -1625,12 +1805,18 @@ def new_session_route():
 
 @app.route('/review')
 def review():
-    return render_template('review.html')
+    session_id = request.args.get('session_id', CURRENT_SESSION)
+    if not _valid_session_id(session_id):
+        return redirect(url_for('index'))
+    return render_template('review.html', session_id=session_id)
 
 
 @app.route('/incidents')
 def incidents_route():
-    rows = list_incidents(CURRENT_SESSION)
+    session_id = request.args.get('session_id', CURRENT_SESSION)
+    if not _valid_session_id(session_id):
+        return jsonify({'message': 'Invalid session.'}), 400
+    rows = list_incidents(session_id)
     for r in rows:
         r['video_url'] = f"/recordings/{r['recording']}" if r['recording'] else None
         r['thumb_url'] = f"/static/{r['thumb']}"         if r['thumb']      else None
