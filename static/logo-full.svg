@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="100%" height="100%">
+  <defs>
+    <radialGradient id="bgAzure" cx="50%" cy="45%" r="70%">
+      <stop offset="0%" stop-color="#0f192b"/>
+      <stop offset="70%" stop-color="#080e18"/>
+      <stop offset="100%" stop-color="#03060a"/>
+    </radialGradient>
+    <linearGradient id="azureGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="60%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1000" height="1000" rx="32" fill="url(#bgAzure)"/>
+  <circle cx="500" cy="400" r="280" fill="none" stroke="#1e293b" stroke-width="1.2" stroke-dasharray="4 6"/>
+
+  <g>
+    <path d="M 500 130 L 730 250 L 660 520 L 500 680 L 340 520 L 270 250 Z" 
+          fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round" opacity="0.35"/>
+
+    <path d="M 390 320 L 350 200 L 310 320 L 240 370 L 310 430 L 380 430 L 430 490" 
+          fill="none" stroke="url(#azureGrad)" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="315" cy="365" r="4.5" fill="#38bdf8"/>
+    <line x1="315" y1="365" x2="350" y2="365" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+
+    <path d="M 610 320 L 650 200 L 690 320 L 760 370 L 690 430 L 620 430 L 570 490" 
+          fill="none" stroke="url(#azureGrad)" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="685" cy="365" r="4.5" fill="#38bdf8"/>
+    <line x1="685" y1="365" x2="650" y2="365" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+
+    <path d="M 450 290 L 465 170 L 500 240 L 535 170 L 550 290" 
+          fill="none" stroke="#ffffff" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 450 290 L 420 370 L 470 470 L 500 520 L 530 470 L 580 370 L 550 290" 
+          fill="none" stroke="#ffffff" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <line x1="500" y1="240" x2="500" y2="440" stroke="#38bdf8" stroke-width="3" stroke-linecap="round"/>
+
+    <polygon points="460,335 480,340 470,350" fill="#38bdf8"/>
+    <polygon points="540,335 520,340 530,350" fill="#38bdf8"/>
+
+    <path d="M 430 520 L 500 600 L 570 520" fill="none" stroke="url(#azureGrad)" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 460 580 L 500 630 L 540 580" fill="none" stroke="#38bdf8" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+
+  <g text-anchor="middle">
+    <text x="500" y="805" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="72" font-weight="800" letter-spacing="24" fill="#f8fafc">CERBERUS</text>
+    <text x="500" y="855" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15" font-weight="600" letter-spacing="8" fill="#38bdf8">REAL-TIME SURVEILLANCE &amp; AUDIT</text>
+    <text x="500" y="895" font-family="'Courier New', monospace" font-size="12" font-weight="600" letter-spacing="5" fill="#64748b">AUTONOMOUS EXAM INTEGRITY</text>
+  </g>
+</svg>

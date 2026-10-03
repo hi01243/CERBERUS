@@ -21,7 +21,7 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
 
-BUILD_ID = "2026-10-03-r17-three-rules-mfa"
+BUILD_ID = "2026-10-03-r18-session-owners"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -1308,9 +1308,10 @@ def _require_login():
     if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint is None:
         return
     if request.endpoint == "static":
-        return
+        return _guard_static()
     if not session.get("user_id"):
         return redirect(url_for("login"))
+    return _guard_session_access()
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -1351,8 +1352,10 @@ def signup():
     if request.method == 'POST':
         username = (request.form.get('username') or '').strip()
         password = request.form.get('password', '')
-        user_id, error = create_user(username, password, request.form.get('invite_code', ''))
+        user_id, error = create_user(username, password)
         if user_id:
+            if user_count() == 1:
+                _assign_unowned_sessions(user_id)   # first account inherits sessions that predate ownership
             session.clear()
             session['user_id'] = user_id
             session['username'] = username
@@ -1410,8 +1413,9 @@ def logout():
 
 @app.route('/')
 def index():
-    return render_template('sessions.html', current_session=CURRENT_SESSION,
-                           monitoring_active=monitoring_active,
+    return render_template('sessions.html',
+                           current_session=CURRENT_SESSION if _owns_current() else None,
+                           monitoring_active=bool(monitoring_active and _owns_current()),
                            mfa_enabled=bool(get_totp_secret(session.get('user_id'))))
 
 
@@ -1468,6 +1472,8 @@ def _session_summaries():
     summaries.setdefault(CURRENT_SESSION, {
         'session_id': CURRENT_SESSION, 'flag_count': 0, 'updated_at': None,
     })
+    owned = set(list_owned_sessions(session.get('user_id')))
+    summaries = {sid: s for sid, s in summaries.items() if sid in owned}
     for summary in summaries.values():
         summary['recordings'] = _session_recordings(summary['session_id'])
         summary['recording_count'] = len(summary['recordings'])
@@ -1626,6 +1632,7 @@ def _delete_session_data(session_id):
     clear_incidents(session_id)
     shutil.rmtree(os.path.join(RECORDINGS_FOLDER, session_id), ignore_errors=True)
     shutil.rmtree(os.path.join(VIOLATION_FOLDER, session_id), ignore_errors=True)
+    remove_session_owner(session_id)
 
     if deleting_current:
         for cam_id, entry in list(camera_registry.items()):
@@ -1635,6 +1642,7 @@ def _delete_session_data(session_id):
             if replacement != session_id and not os.path.exists(os.path.join(RECORDINGS_FOLDER, replacement)):
                 break
         CURRENT_SESSION = replacement
+        set_session_owner(replacement, session.get('user_id'))
         os.makedirs(os.path.join(VIOLATION_FOLDER, CURRENT_SESSION), exist_ok=True)
         for cam_id, entry in list(camera_registry.items()):
             entry["recorder"] = SessionRecorder(CURRENT_SESSION, cam_id)
@@ -1717,7 +1725,8 @@ def new_session_route():
     if monitoring_active:
         return jsonify({
             "status":  "error",
-            "message": "Stop monitoring before starting a new session.",
+            "message": ("Stop monitoring before starting a new session." if _owns_current()
+                        else "Another account is currently monitoring. Try again when they have paused."),
         }), 400
 
     data = request.get_json(silent=True) or {}
@@ -1728,6 +1737,13 @@ def new_session_route():
     safe_name = re.sub(r'[^A-Za-z0-9_-]', '_', name)[:64]
     if not safe_name:
         return jsonify({"status": "error", "message": "Session name has no usable characters."}), 400
+
+    uid = session.get('user_id')
+    existing_owner = get_session_owner(safe_name)
+    if existing_owner is not None and existing_owner != uid:
+        return jsonify({"status": "error",
+                        "message": "That session name is already in use. Choose another."}), 409
+    set_session_owner(safe_name, uid)
 
     for _entry in list(camera_registry.values()):
         _finish_recording(_entry)
@@ -1820,6 +1836,137 @@ def system_stats():
         "rules":            dict(DETECTION_ENABLED),
         "session_id":       CURRENT_SESSION,
     })
+
+
+# ==========================================
+# SESSION OWNERSHIP
+# ==========================================
+# Every session belongs to the account that created it (table session_owners in
+# users.db).  A signed-in user can only list, open, play back, dismiss flags on
+# or delete their own sessions; anything else returns 404, so one account can't
+# even tell that another account's session exists.
+#
+# There is still ONE live session for the whole app (cameras, ARM/PAUSE and the
+# live feed are global).  Only the owner of that live session can use those
+# controls; another account has to create its own session first, which is only
+# possible while monitoring is paused.
+from flask import abort
+from auth import (user_count, first_user_id, get_session_owner, set_session_owner,
+                  remove_session_owner, list_owned_sessions)
+
+LIVE_ENDPOINTS = {
+    "monitor", "video_feed", "get_session_route", "settings_route", "system_stats",
+    "get_violations", "start_monitoring", "stop_monitoring", "reset_session",
+    "list_cameras", "scan_cameras_route", "add_camera_route",
+    "activate_camera_route", "pause_camera_route", "remove_camera_route",
+}
+SESSION_QUERY_ENDPOINTS = {"review", "incidents_route", "session_files_route"}
+
+
+def _owns_current():
+    uid = session.get("user_id")
+    return uid is not None and get_session_owner(CURRENT_SESSION) == uid
+
+
+def _all_known_session_ids():
+    """Every session that has data on disk or in the incident log, plus the
+    current one.  Used to give pre-existing sessions an owner."""
+    ids = {CURRENT_SESSION}
+    try:
+        for row in list_incident_sessions():
+            ids.add(row.get("session_id"))
+    except Exception as e:
+        print(f"[sessions] could not list incident sessions: {e}")
+    for folder in (RECORDINGS_FOLDER, VIOLATION_FOLDER):
+        if os.path.isdir(folder):
+            for name in os.listdir(folder):
+                if os.path.isdir(os.path.join(folder, name)):
+                    ids.add(name)
+    return {i for i in ids if _valid_session_id(i)}
+
+
+def _assign_unowned_sessions(user_id):
+    """Gives every existing session that has no owner to `user_id`."""
+    if user_id is None:
+        return 0
+    count = 0
+    for sid in sorted(_all_known_session_ids()):
+        if get_session_owner(sid) is None and set_session_owner(sid, user_id):
+            count += 1
+    if count:
+        print(f"[sessions] gave {count} existing session(s) with no owner to user #{user_id}")
+    return count
+
+
+def _user_owns_incident(inc_id, uid):
+    if uid is None:
+        return False
+    for sid in list_owned_sessions(uid):
+        try:
+            if any(r.get("id") == inc_id for r in list_incidents(sid)):
+                return True
+        except Exception as e:
+            print(f"[sessions] incident lookup failed for {sid}: {e}")
+    return False
+
+
+def _guard_static():
+    """Evidence images live under /static/violations/<session>/...  They need a
+    login and must belong to one of the user's own sessions."""
+    filename = (request.view_args or {}).get("filename", "")
+    if not filename.startswith("violations/"):
+        return None                      # style.css, script.js, ...
+    uid = session.get("user_id")
+    if uid is None:
+        abort(404)
+    parts = filename.split("/")
+    if len(parts) == 2:
+        return None                      # old flat file, not tied to any session
+    sid = parts[1]
+    if not _valid_session_id(sid) or get_session_owner(sid) != uid:
+        abort(404)
+    return None
+
+
+def _guard_session_access():
+    ep = request.endpoint
+    uid = session.get("user_id")
+
+    if ep in LIVE_ENDPOINTS:
+        if get_session_owner(CURRENT_SESSION) != uid:
+            if ep == "monitor":
+                return redirect(url_for("index"))
+            return jsonify({"status": "error", "message":
+                            "The live session belongs to another account. "
+                            "Create your own session first."}), 403
+        return None
+
+    if ep == "dismiss_incident_route":
+        if not _user_owns_incident((request.view_args or {}).get("inc_id"), uid):
+            abort(404)
+        return None
+
+    sid = None
+    must_be_valid = False
+    if ep in SESSION_QUERY_ENDPOINTS:
+        sid = request.args.get("session_id", CURRENT_SESSION)
+    elif ep == "delete_session_route":
+        sid = (request.view_args or {}).get("session_id")
+    elif ep == "serve_recording":
+        sid = ((request.view_args or {}).get("filepath") or "").split("/")[0]
+        must_be_valid = True
+
+    if sid is not None:
+        if not _valid_session_id(sid):
+            if must_be_valid:
+                abort(404)
+        elif get_session_owner(sid) != uid:
+            abort(404)
+    return None
+
+
+# Sessions that predate ownership go to the first account.
+_assign_unowned_sessions(first_user_id())
 
 
 if __name__ == '__main__':

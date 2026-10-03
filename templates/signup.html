@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CERBERUS - Create account</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
 <style>
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
          background:#12141a; color:#e7e9ee; font:15px/1.5 system-ui, sans-serif; }
@@ -27,6 +28,7 @@
 </head>
 <body>
   <form method="post">
+    <img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="44" style="display:block;height:44px;width:auto;margin:0 0 10px">
     <h1>CERBERUS</h1>
       <p class="sub">Create a proctor account</p>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
@@ -38,8 +40,6 @@
     <label for="password">Password</label>
     <input type="password" id="password" name="password" autocomplete="new-password" required minlength="8">
     <p class="hint">At least 8 characters.</p>
-    <label for="invite_code">Invite code</label>
-    <input type="text" id="invite_code" name="invite_code" autocomplete="off" required>
     <p class="hint">Use the code printed when CERBERUS starts, or ask whoever runs it. The code stays the same across restarts.</p>
     <label class="option" for="enable_mfa">
       <input type="checkbox" id="enable_mfa" name="enable_mfa" value="1">

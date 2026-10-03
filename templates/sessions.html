@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CERBERUS - Sessions</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -57,7 +58,7 @@
 </head>
 <body>
 <header>
-  <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>CERBERUS</span></div>
+  <div class="brand"><img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="28" style="display:block;height:28px;width:auto"><span>CERBERUS</span></div>
   <nav class="header-actions" aria-label="Account">
     <span class="user-name">{{ session.get('username', '-') }}</span>
     <a href="/security/mfa">{% if mfa_enabled %}Manage MFA{% else %}Enable faster MFA{% endif %}</a>

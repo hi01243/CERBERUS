@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CERBERUS - Incident review</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
 <style>
   :root { --bg:#12141a; --panel:#1b1f28; --line:#2c3240; --text:#e7e9ee; --muted:#8e97a8; --flag:#f2b134; --dim:#3a4050; }
   * { box-sizing: border-box; }
@@ -48,7 +49,7 @@
 </head>
 <body>
 <header>
-  <h1>Session: {{ session_id }}</h1>
+  <h1><img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="26" style="display:inline-block;height:26px;width:auto;vertical-align:middle;margin-right:10px">Session: {{ session_id }}</h1>
   <div><button id="refresh">Refresh</button> <a href="/monitor">Monitor</a> <a href="/">Sessions</a></div>
 </header>
 <div id="filters">
