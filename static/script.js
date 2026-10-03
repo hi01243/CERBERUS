@@ -224,19 +224,23 @@ async function stopMonitoring() {
 const RESET_CONFIRM_PHRASE = "DELETE ALL DATA";
 
 async function resetSession() {
+    // Backends without MFA routes (no /security/mfa/status) skip the MFA step.
+    let mfaRequired = false;
     try {
         const statusRes = await fetch('/security/mfa/status');
-        const status = await statusRes.json();
-        if (!statusRes.ok) throw new Error(status.message || "Could not check MFA status.");
-        if (!status.enabled) {
-            if (confirm("Enable authenticator MFA before deleting session records?")) {
-                location.href = '/security/mfa';
+        const type = statusRes.headers.get('content-type') || '';
+        if (statusRes.ok && type.includes('json')) {
+            const status = await statusRes.json();
+            mfaRequired = true;
+            if (!status.enabled) {
+                if (confirm("Enable authenticator MFA before deleting session records?")) {
+                    location.href = '/security/mfa';
+                }
+                return;
             }
-            return;
         }
     } catch (err) {
-        alert(err.message || "Could not check MFA status.");
-        return;
+        mfaRequired = false;   // the server still enforces its own rules
     }
 
     const typed = prompt(
@@ -249,18 +253,21 @@ async function resetSession() {
         return;
     }
 
-    const totpCode = prompt("Enter the current six-digit code from your authenticator app:");
-    if (totpCode === null || !/^\d{6}$/.test(totpCode.trim())) {
-        if (totpCode !== null) alert("A valid authenticator code is required — reset cancelled.");
-        return;
+    let totpCode = "";
+    if (mfaRequired) {
+        totpCode = prompt("Enter the current six-digit code from your authenticator app:");
+        if (totpCode === null || !/^\d{6}$/.test(totpCode.trim())) {
+            if (totpCode !== null) alert("A valid authenticator code is required — reset cancelled.");
+            return;
+        }
     }
     try {
         const res = await fetch('/reset_session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ confirm: typed, totp_code: totpCode.trim() })
+            body: JSON.stringify(mfaRequired ? { confirm: typed, totp_code: totpCode.trim() } : { confirm: typed })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
 
         if (!res.ok) {
             if (data.setup_mfa && confirm(`${data.message}\n\nOpen MFA setup now?`)) {
@@ -411,7 +418,6 @@ function renderFeedAndGallery() {
         let typeClass = "";
         const uType = (v.violation_type || "").toUpperCase();
         if (uType.includes("GAZE")) typeClass = "gaze";
-        else if (uType.includes("INTERACTION")) typeClass = "interaction";
 
         alerts.innerHTML += `
         <div class="alert-item ${typeClass}">
