@@ -27,31 +27,6 @@ def _q(sql, args=(), fetch=False):
         return rows if fetch else cur.lastrowid
 
 
-def _load_invite_code():
-    configured = os.environ.get("CERBERUS_INVITE_CODE", "").strip()
-    if configured:
-        return configured, True
-
-    _q("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    rows = _q("SELECT value FROM app_settings WHERE key='invite_code'", fetch=True)
-    if rows:
-        return rows[0]["value"], False
-
-    generated = secrets.token_urlsafe(6)
-    _q("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('invite_code', ?)", (generated,))
-    rows = _q("SELECT value FROM app_settings WHERE key='invite_code'", fetch=True)
-    return rows[0]["value"], False
-
-
-INVITE_CODE, INVITE_CODE_CONFIGURED = _load_invite_code()
-if not INVITE_CODE_CONFIGURED:
-    print("=" * 64)
-    print(f"  CERBERUS sign-up invite code: {INVITE_CODE}")
-    print("  This code is stored in users.db and remains stable across restarts.")
-    print("  Share this with proctors who need an account.")
-    print("  (set CERBERUS_INVITE_CODE to override it)")
-    print("=" * 64)
-
 
 def init_auth_db():
     _q("""CREATE TABLE IF NOT EXISTS users (
@@ -75,6 +50,7 @@ def init_auth_db():
     except sqlite3.OperationalError:
         pass
     _q("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE)")
+    _init_session_owners()
 
 
 def generate_totp_secret():
@@ -110,15 +86,12 @@ def save_totp_secret(user_id, secret):
     _q("UPDATE users SET totp_secret=? WHERE id=?", (secret, user_id))
 
 
-def create_user(username, password, invite_code):
-    """Returns (user_id, error). error is None on success."""
+def create_user(username, password, invite_code=None):
+    """Returns (user_id, error). error is None on success.
+    Sign-up is open: `invite_code` is accepted for backward compatibility
+    and ignored.  Access is controlled by the account itself (session
+    ownership), not by a shared code."""
     username = str(username or "").strip()
-    invite_code = str(invite_code or "").strip()
-
-    supplied_code = invite_code.casefold().encode("utf-8")
-    expected_code = INVITE_CODE.strip().casefold().encode("utf-8")
-    if not hmac.compare_digest(supplied_code, expected_code):
-        return None, "Invalid invite code."
     if not USERNAME_RE.fullmatch(username):
         return None, "Username must be 3-32 characters: letters, numbers, _ . -"
     if len(password or "") < MIN_PASSWORD_LEN:
@@ -153,3 +126,46 @@ def get_user_by_id(user_id):
 def user_count():
     rows = _q("SELECT COUNT(*) AS c FROM users", fetch=True)
     return rows[0]["c"] if rows else 0
+
+
+# ---------------------------------------------------------------------------
+# Session ownership: every session belongs to the account that created it.
+# ---------------------------------------------------------------------------
+def _init_session_owners():
+    _q("""CREATE TABLE IF NOT EXISTS session_owners (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    _q("CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(user_id)")
+
+
+def first_user_id():
+    rows = _q("SELECT MIN(id) AS m FROM users", fetch=True)
+    return rows[0]["m"] if rows else None
+
+
+def get_session_owner(session_id):
+    rows = _q("SELECT user_id FROM session_owners WHERE session_id=?", (session_id,), fetch=True)
+    return rows[0]["user_id"] if rows else None
+
+
+def set_session_owner(session_id, user_id):
+    """Records the owner of a session that has none yet.  Never takes a session
+    away from its current owner.  Returns True if `user_id` owns it afterwards."""
+    if user_id is None:
+        return False
+    _q("INSERT OR IGNORE INTO session_owners (session_id, user_id) VALUES (?, ?)",
+       (session_id, user_id))
+    return get_session_owner(session_id) == user_id
+
+
+def remove_session_owner(session_id):
+    _q("DELETE FROM session_owners WHERE session_id=?", (session_id,))
+
+
+def list_owned_sessions(user_id):
+    if user_id is None:
+        return []
+    rows = _q("SELECT session_id FROM session_owners WHERE user_id=? ORDER BY created_at DESC",
+              (user_id,), fetch=True)
+    return [r["session_id"] for r in rows]

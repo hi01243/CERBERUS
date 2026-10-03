@@ -1,4 +1,6 @@
-# CERBERUS
+<p align="center">
+  <img src="static/logo-full.svg" alt="CERBERUS" width="300">
+</p>
 
 AI-assisted exam proctoring dashboard. CERBERUS watches one or more camera feeds, uses YOLO11 pose and object models to flag suspicious behaviour, records every session, and gives a reviewer a timeline to check each flag against the recording.
 
@@ -19,10 +21,11 @@ It flags three things:
 - **Live monitoring dashboard** with a camera grid, live counters, an audit log, and an evidence gallery you can filter by flag type
 - **Multiple cameras**: local webcams, IP/RTSP streams (for example a phone), and video files that loop for demos. Cameras are added from the dashboard without a restart
 - **Per-exam sessions**: each exam gets its own recordings and incidents, so two exams on the same day never mix
+- **Per-account session ownership**: every session belongs to the account that created it. You only see, review, play back, dismiss flags on, or delete your own sessions, and evidence images are protected the same way
 - **Review page**: play an incident from 5 seconds before the alert, jump around on an incident timeline, pick between recordings, filter active or dismissed flags, and dismiss false positives
 - **Multi-camera grouping**: the same violation seen by several cameras within 5 seconds shows as one card with a camera picker (display only; nothing is merged or deleted)
 - **Live rule toggles**: switch phone, reach, or gaze detection on or off per exam, for example when calculators are allowed
-- **Accounts and MFA**: per-user sign-in with an invite code to sign up, optional authenticator-app (TOTP) MFA, and MFA-gated session deletion
+- **Accounts and MFA**: username and password sign-up, optional authenticator-app (TOTP) MFA, and MFA-gated session deletion
 - **Crash recovery**: recordings left half-written by a crash or power loss are finalised on the next start so they stay playable
 
 ---
@@ -31,11 +34,9 @@ It flags three things:
 
 - Python 3.9+
 - A webcam, IP camera, or video file to test with
-- Packages: Flask, OpenCV (`opencv-python`), Ultralytics, NumPy
-- The YOLO weights `yolo11n-pose.pt` and `yolo11n.pt`. Ultralytics downloads them on first run unless you place them next to `app.py`
+- Packages: Flask (which brings Werkzeug, used for password hashing), OpenCV (`opencv-python`), Ultralytics, NumPy. MFA codes are generated with the standard library, so no extra TOTP package is needed
+- The YOLO weights `yolo11n-pose.pt` and `yolo11n.pt`. Ultralytics downloads them on first run unless you place them next to `app.py`, so the first run needs internet access
 - **Recommended:** `ffmpeg` on your PATH. Without it, some recordings may not play in the browser
-
-<!-- TODO: add any extra packages that auth.py or recording.py import (for example a TOTP library) -->
 
 ## Installation
 
@@ -55,7 +56,7 @@ pip install flask opencv-python ultralytics numpy
 python app.py
 ```
 
-Then open <http://127.0.0.1:5000>. On startup the console prints the build ID and the **invite code** you need to create the first account.
+Then open <http://127.0.0.1:5000>. The console prints the build ID on startup. Create your first account at `/signup`.
 
 ### Configuration
 
@@ -66,27 +67,38 @@ Then open <http://127.0.0.1:5000>. On startup the console prints the build ID an
 
 The server listens on port 5000.
 
+> **Sign-up is open.** Anyone who can reach the login page can create an account. The default `127.0.0.1` setting keeps that to your own machine. If you set `CERBERUS_HOST=0.0.0.0`, only do so on a network you trust.
+
 ---
 
 ## Using CERBERUS
 
-1. **Sign up** at `/signup` with a username, password (8+ characters), and the invite code. You can enable authenticator MFA at the same time.
-2. On the **Sessions** page (`/`), either name a new session and click **Create session and start**, or open an existing one.
+1. **Sign up** at `/signup` with a username (3-32 characters: letters, numbers, `_ . -`) and a password (8+ characters). You can enable authenticator MFA at the same time, or later at `/security/mfa`.
+2. On the **Sessions** page (`/`), either name a new session and click **Create session and start**, or open one of your existing sessions. A new account starts with an empty list.
 3. On the **Monitor** page (`/monitor`):
    - Camera 0 is registered by default. Click **Scan for Local Cameras**, or add an IP camera URL (`http://`, `https://`, `rtsp://`) or a video file path.
    - Click **Use** on a camera tile to start it.
    - Choose which **Detection Rules** apply to this exam.
    - Click **ARM MONITORING** to start flagging, and **PAUSE SYSTEM** to stop. Recordings are finalised on pause.
-4. Open **Review Recordings** (`/review`) to go through flags, watch the footage, and dismiss false positives.
+4. Open **Review Recordings** (`/review`) to go through flags, watch the footage, and dismiss false positives. Use **Sessions** in the header to return to the home page.
+
+### Accounts and session ownership
+
+- A session belongs to the account that created it. Another account that asks for your session, recording, incident, or evidence image gets a 404, so it cannot even tell that the session exists.
+- There is **one live session for the whole app**. Cameras, ARM/PAUSE, the live feed, and the rule toggles belong to whoever owns the live session. Another account must create its own session first, which is only possible while monitoring is paused, and doing so takes over the live controls.
+- Session names are unique across accounts. Creating a name that another account already uses is refused.
+- **Upgrading from an older build:** sessions that existed before ownership was added are given to the first account that was created. If no account exists yet, the first sign-up inherits them.
 
 ### Deleting data
 
 Deletion is deliberately hard to do by accident:
 
 - **Delete a session** (Sessions page): monitoring must be paused for the active session, you must have MFA enabled, and you must enter an authenticator code and type the exact session name.
-- **Reset session** (Monitor page): monitoring must be paused, and you must type `DELETE ALL DATA` and enter an authenticator code. A fresh session is created afterwards.
+- **Reset session** (Monitor page): monitoring must be paused, and you must type `DELETE ALL DATA` and enter an authenticator code. A fresh session, owned by you, is created afterwards.
 
 Both remove the session's database rows, recordings, and evidence images, and cannot be undone.
+
+> **Keep your MFA setup key somewhere safe.** Once MFA is on, sign-in needs an authenticator code, and there are no backup codes. If you lose the device, you are locked out of that account.
 
 ---
 
@@ -126,8 +138,9 @@ Duplicate ("ghost") skeletons are filtered out before they touch any timer, and 
 cerberus/
 ├── app.py            # Flask app, camera registry, detection loop, routes
 ├── database.py       # SQLite violation log (cerberus.db)
-├── recording.py      # Session recording and incident tracking
-├── auth.py           # Users, invite codes, TOTP MFA
+├── recording.py      # Session recording and incident tracking (incidents.db)
+├── auth.py           # Accounts, session ownership, TOTP MFA (users.db)
+├── recordings/       # Session videos, created at runtime
 ├── templates/
 │   ├── sessions.html   # Session browser and landing page
 │   ├── index.html      # Live monitor dashboard (/monitor)
@@ -143,31 +156,35 @@ cerberus/
 
 ## HTTP routes
 
-All routes except `/login`, `/signup`, and static files require sign-in.
+All routes except `/login`, `/signup`, and public static files (such as `style.css`) require sign-in. "Own sessions only" means a request for someone else's session returns 404. "Live owner only" means the signed-in account must own the current live session, otherwise the request is refused (403 for API calls, a redirect to `/` for `/monitor`).
 
-| Route | Method | Purpose |
-|-------|--------|---------|
-| `/` | GET | Sessions page |
-| `/monitor` | GET | Live dashboard |
-| `/review?session_id=` | GET | Incident review |
-| `/video_feed/<camera_id>` | GET | MJPEG stream of the annotated feed |
-| `/cameras`, `/cameras/scan`, `/cameras/add` | GET / POST | List, scan for, and add cameras |
-| `/cameras/<id>/activate`, `/pause`, `/remove` | POST | Control a camera |
-| `/start_monitoring`, `/stop_monitoring` | POST | Arm or pause detection |
-| `/settings` | GET / POST | Read or change which rules are on |
-| `/session`, `/session/new` | GET / POST | Current session, or start a new one |
-| `/sessions`, `/session_files` | GET | Session summaries and recordings |
-| `/sessions/<id>` | DELETE | Delete a session (MFA required) |
-| `/reset_session` | POST | Reset the current session (MFA required) |
-| `/incidents`, `/incidents/<id>/dismiss` | GET / POST | List incidents, dismiss a false positive |
-| `/get_violations`, `/system_stats` | GET | Recent violations and dashboard counters |
-| `/recordings/<path>` | GET | Serve a recording (supports seeking) |
-| `/security/mfa`, `/security/mfa/status`, `/security/mfa/disable` | GET / POST | MFA management |
+| Route | Method | Access | Purpose |
+|-------|--------|--------|---------|
+| `/` | GET | Signed in | Sessions page (your sessions only) |
+| `/monitor` | GET | Live owner only | Live dashboard |
+| `/review?session_id=` | GET | Own sessions only | Incident review |
+| `/video_feed/<camera_id>` | GET | Live owner only | MJPEG stream of the annotated feed |
+| `/cameras`, `/cameras/scan`, `/cameras/add` | GET / POST | Live owner only | List, scan for, and add cameras |
+| `/cameras/<id>/activate`, `/pause`, `/remove` | POST | Live owner only | Control a camera |
+| `/start_monitoring`, `/stop_monitoring` | POST | Live owner only | Arm or pause detection |
+| `/settings` | GET / POST | Live owner only | Read or change which rules are on |
+| `/session` | GET | Live owner only | Current session |
+| `/session/new` | POST | Signed in | Start a new session (monitoring must be paused) |
+| `/sessions`, `/session_files` | GET | Own sessions only | Session summaries and recordings |
+| `/sessions/<id>` | DELETE | Own sessions only, MFA required | Delete a session |
+| `/reset_session` | POST | Live owner only, MFA required | Reset the current session |
+| `/incidents`, `/incidents/<id>/dismiss` | GET / POST | Own sessions only | List incidents, dismiss a false positive |
+| `/get_violations`, `/system_stats` | GET | Live owner only | Recent violations and dashboard counters |
+| `/recordings/<path>` | GET | Own sessions only | Serve a recording (supports seeking) |
+| `/static/violations/<session>/...` | GET | Own sessions only | Evidence thumbnails |
+| `/security/mfa`, `/security/mfa/status`, `/security/mfa/disable` | GET / POST | Signed in | MFA management |
 
 ## Known limitations
 
 - Subtle phone use is still easy to miss, and a phone under a desk or in a lap may not be seen.
 - Reach and gaze use 2D geometry from one camera angle, so overlapping students at different depths can confuse them.
 - Matching a phone to a student is a best-effort nearest-shoulder guess, not verified possession.
-- Calculators and some watches can be flagged as phones, so use the Phone rule toggle.
+- Calculators can be flagged as phones, so use the Phone rule toggle.
+- Everything is tuned for seated students at normal exam spacing. Small objects in the back rows of a large room are only a few pixels wide and will be missed.
+- There is only one live session at a time, shared by the whole app. Any account can take over the live controls by creating a session while monitoring is paused.
 - Video lag on weaker machines. Run on a GPU or lower the number of cameras for large rooms.

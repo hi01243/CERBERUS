@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CERBERUS - Sign in</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
 <style>
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
          background:#12141a; color:#e7e9ee; font:15px/1.5 system-ui, sans-serif; }
@@ -22,6 +23,7 @@
 </head>
 <body>
   <form method="post">
+    <img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="44" style="display:block;height:44px;width:auto;margin:0 0 10px">
     <h1>CERBERUS</h1>
     <p class="sub">Exam proctoring dashboard</p>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}

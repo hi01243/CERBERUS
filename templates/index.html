@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CERBERUS AI — Exam Proctoring Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
     
     <!-- Modern Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -19,7 +20,7 @@
     <header class="app-header">
         <div class="brand">
             <div class="brand-logo">
-                <span class="pulse-dot"></span>
+                <img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="28" style="display:block;height:28px;width:auto">
                 <span>CERBERUS</span>
             </div>
             <span class="badge">AI PROCTOR CORE</span>
