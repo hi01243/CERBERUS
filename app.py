@@ -13,7 +13,7 @@ from collections import deque
 import math
 import numpy as np
 
-# Database helper functions from database.py
+
 from database import init_db, log_violation, get_recent_violations, clear_violations
 from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        list_incidents, list_incident_sessions, clear_incidents, dismiss_incident,
@@ -22,30 +22,20 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
 
 BUILD_ID = "2026-10-03-r18-session-owners"
-print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
 
-# Initialize SQLite database schema
 init_db()
 init_incident_db()
 init_auth_db()
-
-# Finalize any recordings a previous crash / power loss left half-written,
-# so they're playable in /review instead of permanently stuck at "processing".
-cleanup_orphaned_recordings()
+cleanup_orphaned_recordings()  # finalise any half-written recordings from a previous crash
 
 VIOLATION_FOLDER = os.path.join('static', 'violations')
 os.makedirs(VIOLATION_FOLDER, exist_ok=True)
 
 CURRENT_SESSION = "SESSION_ROOM_A1"
 
-# --- SYSTEM STATE & THRESHOLDS ---
-monitoring_active = False   # session-wide arm/disarm (the ARM/PAUSE buttons)
-
-# NOTE: all thresholds below are hand-calibrated, not learned. Before demo
-# day, run a real test session with people seated at actual exam spacing
-# and adjust these against what you observe -- don't trust them untested.
+monitoring_active = False  # session-wide arm/disarm toggle
 HEAD_TURN_RATIO_THRESHOLD = 0.45  # horizontal nose-displacement ratio, not a raw angle
 GAZE_DURATION_THRESHOLD = 3.0
 SPINE_TILT_THRESHOLD_DEG = 25.0
@@ -53,10 +43,7 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SMOOTHING_WINDOW = 5
 
-# --- DETECTION RULE SWITCHES (change live via POST /settings) ---
-# Per-exam rules.  Exactly three rules exist: phone, reach, gaze.  An allowed
-# calculator can look like a "cell phone" to YOLO, so turn "phone" off when the
-# exam allows them.
+# Detection rules — toggled live via POST /settings.
 DETECTION_ENABLED = {
     "phone":       True,
     "reach":       True,
@@ -64,8 +51,6 @@ DETECTION_ENABLED = {
 }
 
 # --- WRIST-CROP PHONE PASS ---
-# Second, zoomed-in phone check on a crop around each wrist (see
-# _merge_wrist_phones).  Governed by DETECTION_ENABLED["phone"] as well.
 WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
@@ -79,26 +64,16 @@ WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
 
 # --- NEIGHBOR-AWARE SIDE GAZE ---
-# A left/right head turn only counts as "looking at another student" if some
-# other student sits on that side, in roughly the same row.  Distances are in
-# units of the turning student's shoulder width (image left = "LOOKING LEFT").
-GAZE_REQUIRE_NEIGHBOR = False   # r8: off by default; turn on only after testing on real footage
+GAZE_REQUIRE_NEIGHBOR = False
 GAZE_NEIGHBOR_MIN_DX  = 0.6   # neighbor must be at least this far to the side
 GAZE_NEIGHBOR_MAX_DX  = 6.0   # ...and no farther than this
 GAZE_NEIGHBOR_ROW_MULT = 2.0  # max vertical offset between shoulder centers
 
 # --- POSE MODEL INFERENCE SETTINGS ---
-# A higher NMS IoU / confidence cuts down on the model emitting two
-# overlapping skeletons for one person (the root cause of "ghost" students).
 POSE_IOU  = 0.5
 POSE_CONF = 0.4
 
 # --- DUPLICATE-SKELETON (GHOST TRACK) FILTER ---
-# Two skeletons whose shoulder centers sit closer than this fraction of
-# their shoulder width cannot be two different seated people -- it's one
-# person detected twice.  The older / higher-confidence one is kept.
-# Without this, a ghost paired with its real twin reads as "shoulder
-# distance ~0" and trips STUDENT_INTERACTION and REACHING_NEIGHBOR_ZONE.
 DUPLICATE_DIST_MULTIPLIER = 0.8
 
 # --- ADAPTIVE "NORMAL POSITION" BASELINE ---
@@ -109,17 +84,15 @@ REPOSITION_JUMP_LIMIT = HEAD_TURN_RATIO_THRESHOLD * 0.8
 REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 
 # --- STATIC-OBJECT FILTER (phones) ---
-# Seat plates / furniture that never move are not phones.  The tracker
-# (_check_static_clocks) is shared by the full-frame and wrist-crop phone passes.
-STATIC_CLOCK_SEC       = 8.0
-STATIC_CLOCK_RADIUS_PX = 60
-STATIC_CLOCK_MOVE_PX   = 35
-WRIST_CROP_MAX_WRIST_DIST  = 0.6   # phone centre must be within this x shoulder width of the wrist
-WRIST_CROP_STATIC_SEC      = 6.0   # a wrist-crop 'phone' this still ...
-WRIST_CROP_STATIC_MOVE_PX  = 8     # ... (moves less than this) is furniture
-HELD_PHONE_WRIST_MULT      = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
-STATIC_PHONE_SEC       = 10.0   # a full-frame 'phone' that never moves this long is furniture,
-                                # unless a visible wrist is within WRIST_PROXIMITY_PX of it
+# Suppresses stationary detections that are seat plates or furniture, not phones.
+STATIC_OBJECT_RADIUS_PX   = 60
+STATIC_OBJECT_MOVE_PX     = 35
+WRIST_CROP_MAX_WRIST_DIST = 0.6   # phone centre must be within this x shoulder width of the wrist
+WRIST_CROP_STATIC_SEC     = 6.0   # a wrist-crop 'phone' this still ...
+WRIST_CROP_STATIC_MOVE_PX = 8     # ... (moves less than this) is furniture
+HELD_PHONE_WRIST_MULT     = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
+STATIC_PHONE_SEC          = 10.0  # a full-frame 'phone' that never moves this long is furniture,
+                                  # unless a hand is holding it
 
 # --- CAMERA-BUMP DETECTION ---
 CAMERA_BUMP_RATIO        = 0.6
@@ -130,17 +103,8 @@ CAMERA_BUMP_COOLDOWN_SEC = 5.0
 TRACK_MIN_AGE_SEC = 1.0
 
 # --- NOTE-PASSING / REACHING DETECTION ---
-# A hand-off is detected two ways (either one counts):
-#   A. ZONE:      a wrist enters a circle around the neighbor's shoulder
-#                 center (REACH_ZONE_RADIUS_MULTIPLIER x their shoulder width).
-#   B. EXTENSION: the arm is stretched out (wrist farther than
-#                 REACH_EXTENSION_MULTIPLIER x own shoulder width from own
-#                 shoulders) AND the wrist has travelled at least
-#                 REACH_PROGRESS_MIN of the way toward the neighbor.  This
-#                 is what catches a paper being passed across an aisle,
-#                 where the hand never gets near the neighbor's chest.
-# B only applies to students in roughly the same row, so a person merely
-# stretching in front of / behind another isn't paired with them.
+# Two triggers (either counts): A) wrist enters a circle around the neighbour's
+# shoulder; B) arm stretched out toward a side-by-side neighbour (same-row only).
 REACH_ZONE_RADIUS_MULTIPLIER    = 1.5
 REACH_EXTENSION_MULTIPLIER      = 1.6
 REACH_PROGRESS_MIN              = 0.35
@@ -148,49 +112,26 @@ REACH_SAME_ROW_MULTIPLIER       = 1.0    # max vertical offset between shoulder 
 REACH_MAX_PAIR_DIST_MULTIPLIER  = 8.0    # generous: the extension test does the real filtering
 REACH_DURATION_THRESHOLD        = 1.0
 REACH_GRACE_SEC                 = 0.4    # tolerate a dropped wrist keypoint for this long
-REACH_WRIST_CONF                = 0.3    # wrists are blurry mid-motion; accept lower confidence
-# Shoulder-width ratio between the two students must fall in this band, or
-# they are at different depths (different rows) and are never paired.
-REACH_DEPTH_RATIO_MIN = 0.75
+REACH_WRIST_CONF                = 0.3    # accept lower conf; wrists are blurry mid-motion
+REACH_DEPTH_RATIO_MIN = 0.75  # shoulder-width ratio band — outside this means different rows
 REACH_DEPTH_RATIO_MAX = 1.33
-# Only students who are really side by side (shoulder centers at least this many
-# average shoulder widths apart horizontally) can hand something to each other.
-# Someone sitting directly behind another student has almost no horizontal gap.
-REACH_MIN_SIDE_GAP_MULTIPLIER = 1.2
+REACH_MIN_SIDE_GAP_MULTIPLIER = 1.2  # students must be side-by-side, not front-to-back
 
 # --- HEAD-POSE ROBUSTNESS ---
-# Looking DOWN at a paper shifts the nose sideways relative to the shoulder
-# line and used to read as "looking left/right".  We now also track how far
-# the nose sits above the shoulder line (normalised by shoulder width); if it
-# has dropped by more than PITCH_DOWN_DELTA versus this student's baseline,
-# a sideways reading is classified LOOKING DOWN and ignored.
+# Pitch term: nose dropping below baseline => LOOKING DOWN (paper), not a side gaze.
 PITCH_DOWN_DELTA = 0.30
-# A very large sideways reading is a real turn no matter what the pitch says.
-# Twisting / leaning tilts the shoulder line and inflates the pitch number, so
-# without this override a genuine turn (yaw ~ -1.3 in testing) was being
-# excused as "looking down".  Only MODERATE readings can be excused.
-HEAD_TURN_STRONG_RATIO = 0.7   # was 1.0; tune on the 'looking at another student' clips
-# A gaze timer survives a dip below threshold this long (a blink, one noisy
-# frame) instead of restarting from zero.
+# Strong yaw overrides the pitch excuse — only moderate readings can be dismissed.
+HEAD_TURN_STRONG_RATIO = 0.7
+# Grace: gaze timer survives brief dips (blink / noisy frame) without resetting.
 GAZE_GRACE_SEC = 0.8
-# If a student stays "flagged" this long, it is a held posture (leaning over
-# to write, shifted chair) rather than a glance: the incident was already
-# logged at GAZE_DURATION_THRESHOLD, so re-baseline to stop the endless alert.
+# If flagged this long it's a held posture (leaning to write); re-baseline silently.
 GAZE_REBASELINE_SEC = 8.0
-# Per-track state is kept this long after a track disappears, so a single
-# missed frame doesn't wipe a student's baseline and restart calibration.
-TRACK_LOST_GRACE_SEC = 1.5
-# Draws yaw / pitch numbers by each student so thresholds can be tuned by eye.
-DEBUG_OVERLAY = True
+TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
+DEBUG_OVERLAY = True        # draw yaw/pitch numbers on frame for threshold tuning
 
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
 # ==========================================
-# activate_camera()  -> opens cap, loads models, starts _detection_loop() thread.
-# _detection_loop()  -> reads frames, runs YOLO, records, logs incidents.
-# generate_frames()  -> trivial MJPEG streamer yielding entry["latest_frame"].
-# pause_camera()     -> stop_event, join, release cap.
-# remove_camera()    -> same, then drops entry from registry.
 camera_registry = {}
 registry_lock = threading.Lock()
 _next_camera_num = 1
@@ -234,25 +175,18 @@ def add_camera(source, cam_type, label=None):
         "reach_timers":       {},
         "recorder":  SessionRecorder(CURRENT_SESSION, cam_id),
         "incidents": IncidentTracker(),
-        # --- adaptive baseline state, per track_id ---
         "baseline_ratio":    {},
         "calibration_start": {},
         "stable_since":      {},
         "stable_anchor":     {},
-        # --- background detection thread ---
         "latest_frame": None,
         "stop_event":   threading.Event(),
         "thread":       None,
-        # --- smartwatch static-position tracker ---
-        "static_objects": {},
         "static_phones":  {},
         "static_wc":      {},
-        # --- camera-bump detection ---
         "last_bump_time": 0.0,
-        # --- track-age gate ---
         "track_first_seen": {},
         "track_last_seen":  {},
-        # --- head-pose baseline extras ---
         "calib_samples":   {},
         "baseline_height": {},
         "pitch_history":   {},
@@ -304,7 +238,7 @@ PER_TRACK_KEYS = ("gaze_timers", "turn_history", "baseline_ratio", "calibration_
 
 def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
-    for key in PER_TRACK_KEYS + ("reach_timers", "static_objects", "static_phones", "static_wc"):
+    for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
 
 
@@ -373,8 +307,7 @@ def scan_local_cameras(max_index=4):
     return found
 
 
-# Pre-register one default local camera so the dashboard is not empty.
-add_camera(0, "local", label="cam1")
+add_camera(0, "local", label="cam1")  # default camera so the dashboard is not empty
 
 
 def _neighbor_in_direction(turn, track_id, candidates, kept_idx):
@@ -479,7 +412,7 @@ def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_det
             del confirmed[tid]
 
         conf_items = list(confirmed.items())
-        wc_static = _check_static_clocks(
+        wc_static = _check_static_objects(
             entry, [c["det"]["center"] for _, c in conf_items], now,
             store="static_wc", static_sec=WRIST_CROP_STATIC_SEC,
             move_px=WRIST_CROP_STATIC_MOVE_PX)
@@ -598,14 +531,14 @@ def _find_reaching_wrist(reacher, target, same_row):
 
 
 # ==========================================
-# SMARTWATCH STATIC-POSITION TRACKER (Guard A)
+# STATIC-OBJECT POSITION TRACKER
 # ==========================================
-def _check_static_clocks(entry, centers, now, store="static_objects",
-                        static_sec=STATIC_CLOCK_SEC,
-                        move_px=STATIC_CLOCK_MOVE_PX):
-    """Update the per-camera tracker for clock bbox centres and return the
+def _check_static_objects(entry, centers, now, store="static_phones",
+                          static_sec=STATIC_PHONE_SEC,
+                          move_px=STATIC_OBJECT_MOVE_PX):
+    """Update the per-camera tracker for detected object bbox centres and return the
     set of indices (into `centers`) suppressed because the object has sat in
-    the same spot for >= STATIC_CLOCK_SEC (almost certainly a wall clock)."""
+    the same spot for >= static_sec (furniture, seat-number plates, etc.)."""
     tracker  = entry.setdefault(store, {})
     NEXT_KEY = "__next"
     next_id  = tracker.get(NEXT_KEY, 0)
@@ -622,7 +555,7 @@ def _check_static_clocks(entry, centers, now, store="static_objects",
             if tid == NEXT_KEY:
                 continue
             d = math.hypot(center[0] - td["center"][0], center[1] - td["center"][1])
-            if d < STATIC_CLOCK_RADIUS_PX and d < best_dist:
+            if d < STATIC_OBJECT_RADIUS_PX and d < best_dist:
                 best_id, best_dist = tid, d
 
         if best_id is not None:
@@ -702,7 +635,7 @@ def _detection_loop(camera_id):
                     continue
 
             h, w, _ = frame.shape
-            clean_frame = frame.copy()   # un-annotated copy for the wrist-crop pass
+            clean_frame = frame.copy()
             current_time = time.time()
 
             gaze_timers      = entry["gaze_timers"]
@@ -791,9 +724,8 @@ def _detection_loop(camera_id):
                     else:
                         track_ids = [None] * len(kpts)
 
-                    # --- PRE-PASS: register first-seen times and collect
-                    # valid candidates so ghost skeletons can be dropped
-                    # BEFORE they touch any timer, baseline, or violation. ---
+                    # Pre-pass: collect candidates and drop ghost skeletons before
+                    # any timer/baseline/violation logic runs.
                     candidates = []
                     for idx, person in enumerate(kpts):
                         track_id = track_ids[idx] if idx < len(track_ids) else None
@@ -883,12 +815,8 @@ def _detection_loop(camera_id):
                                     (shoulder_center[0] - 20, shoulder_center[1] + 25),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
-                        # --- HEAD YAW: HORIZONTAL-DISPLACEMENT RATIO, WITH
-                        #     ADAPTIVE PER-STUDENT "NORMAL POSITION" BASELINE ---
-                        # Baseline = MEDIAN over the calibration window (not one
-                        # noisy frame).  A pitch term (nose height above the
-                        # shoulder line) separates "looking down at the paper"
-                        # from "turning sideways".
+                        # Head yaw: nose displacement ratio vs adaptive per-student baseline.
+                        # A pitch term (nose height) separates looking-down from turning sideways.
                         person_turn    = "FORWARD"
                         smoothed_ratio = 0.0
                         adjusted_ratio = 0.0
@@ -1057,9 +985,7 @@ def _detection_loop(camera_id):
                 students   = []
                 active_ids = []
 
-            # Prune per-track state only after a track has been gone for
-            # TRACK_LOST_GRACE_SEC, so one missed frame doesn't wipe a
-            # student's baseline and force a re-calibration.
+            # Prune per-track state after TRACK_LOST_GRACE_SEC to survive brief dropouts.
             for tid in active_ids:
                 track_last_seen[tid] = current_time
             for tid in list(track_first_seen):
@@ -1070,7 +996,6 @@ def _detection_loop(camera_id):
                 for key in PER_TRACK_KEYS:
                     entry[key].pop(tid, None)
 
-            # 2.4 WRIST-CROP PHONE PASS: small phones held in hands
             _merge_wrist_phones(entry, camera_id, clean_frame, students,
                                 current_time, object_detections)
 
@@ -1096,11 +1021,10 @@ def _detection_loop(camera_id):
             # ==========================================
             # 2.5. STATIC-PHONE FILTER
             # ==========================================
-            # Stationary "phones" (seat-number plates etc.).  Wrist-crop detections carry
-            # a track_id and are exempt.
+            # Wrist-crop detections carry a track_id and are exempt from suppression.
             phone_dets = [(i, d) for i, d in enumerate(object_detections)
                           if d["name"] == "CELL PHONE" and d.get("track_id") is None]
-            phone_sup  = _check_static_clocks(entry, [d["center"] for _, d in phone_dets],
+            phone_sup  = _check_static_objects(entry, [d["center"] for _, d in phone_dets],
                                                current_time, store="static_phones",
                                                static_sec=STATIC_PHONE_SEC)
             static_phone_idx = {phone_dets[k][0] for k in phone_sup}
@@ -1124,8 +1048,6 @@ def _detection_loop(camera_id):
             # ==========================================
             # 3. ATTRIBUTE OBJECT DETECTIONS TO A STUDENT
             # ==========================================
-            # Best-effort nearest-shoulder match, NOT a verified possession
-            # check.  Known limitation; state it if asked.
             if object_detections:
                 object_violation = True
                 best_det = max(object_detections, key=lambda d: d["confidence"])
@@ -1144,7 +1066,7 @@ def _detection_loop(camera_id):
                         nearest_dist    = d
                         nearest_student = s
                 violating_track_id = nearest_student["track_id"] if nearest_student else None
-                if best_det.get("track_id") is not None:   # found in a wrist crop
+                if best_det.get("track_id") is not None:
                     violating_track_id = best_det["track_id"]
 
             # ==========================================
@@ -1162,15 +1084,10 @@ def _detection_loop(camera_id):
                         s1["shoulder_center"][1] - s2["shoulder_center"][1])
                     avg_shoulder_w  = (s1["shoulder_width"] + s2["shoulder_width"]) / 2.0
 
-                    # Safety net: if a ghost skeleton still slipped past the
-                    # pre-pass filter, two "students" occupying the same
-                    # body are one person, not a pair.
                     if dist < min(s1["shoulder_width"], s2["shoulder_width"]) * DUPLICATE_DIST_MULTIPLIER:
-                        continue
+                        continue  # ghost pair — same body detected twice
 
-                    # (student-interaction / proximity detection removed: gaze + reach cover it)
-
-                    # --- Note-passing / reach check, both directions. ---
+                    # Reach check, both directions.
                     if dist > avg_shoulder_w * REACH_MAX_PAIR_DIST_MULTIPLIER:
                         continue
                     same_row = abs(s1["shoulder_center"][1] - s2["shoulder_center"][1]) \
@@ -1206,7 +1123,6 @@ def _detection_loop(camera_id):
                                             (reach_wrist[0] - 20, max(20, reach_wrist[1] - 10)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2)
 
-            # Keep a reach timer alive through brief keypoint dropouts.
             for k in [k for k, v in reach_timers.items()
                       if k not in active_reach_pairs
                       and current_time - v["last"] > REACH_GRACE_SEC]:
@@ -1289,15 +1205,12 @@ def generate_frames(camera_id):
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-        time.sleep(0.033)   # ~30 fps cap regardless of detection speed
+        time.sleep(0.033)  # ~30 fps
 
 
 # ==========================================
 # ACCESS CONTROL
 # ==========================================
-# Per-user accounts (see auth.py).  A persistent CERBERUS_SECRET_KEY is
-# optional -- without one, a new random key is generated each run and
-# everyone is signed out on restart.
 app.secret_key = os.environ.get("CERBERUS_SECRET_KEY") or secrets.token_hex(32)
 
 PUBLIC_ENDPOINTS = {"login", "signup"}
@@ -1409,7 +1322,7 @@ def logout():
     return redirect(url_for('login'))
 
 
-# --- FLASK ROUTES ---
+
 
 @app.route('/')
 def index():
@@ -1544,7 +1457,6 @@ def add_camera_route():
         cam_type = "local"
 
     elif os.path.isfile(raw_source):
-        # Video file path; loops on EOF for continuous demo replay.
         source   = raw_source
         cam_type = "file"
 
@@ -1616,8 +1528,7 @@ def stop_monitoring():
     return jsonify({"status": "stopped"})
 
 
-# Session deletion requires TOTP MFA and an exact typed phrase.
-RESET_CONFIRM_PHRASE = "DELETE ALL DATA"
+RESET_CONFIRM_PHRASE = "DELETE ALL DATA"  # required phrase for /reset_session
 
 
 def _delete_session_data(session_id):
@@ -1789,7 +1700,6 @@ def dismiss_incident_route(inc_id):
 
 @app.route('/recordings/<path:filepath>')
 def serve_recording(filepath):
-    # conditional=True enables HTTP Range requests, which <video> needs for seeking.
     return send_from_directory(RECORDINGS_FOLDER, filepath, conditional=True)
 
 
@@ -1814,15 +1724,13 @@ def system_stats():
         print(f"[DB ERROR in system_stats]: {e}")
         records = []
 
-    phone_count = interaction_count = reach_count = gaze_count = 0
+    phone_count = reach_count = gaze_count = 0
     for r in records:
         v_type = str(r.get('violation_type', '')).upper()
-        if "OBJECT" in v_type or "PHONE" in v_type or "WATCH" in v_type:
+        if "OBJECT" in v_type or "PHONE" in v_type:
             phone_count += 1
         elif "REACH" in v_type:
             reach_count += 1
-        elif "INTERACTION" in v_type:
-            interaction_count += 1
         elif "GAZE" in v_type:
             gaze_count += 1
 
@@ -1830,7 +1738,6 @@ def system_stats():
         "monitoring":       monitoring_active,
         "total_violations": len(records),
         "phone":            phone_count,
-        "interaction":      interaction_count,
         "reach":            reach_count,
         "gaze":             gaze_count,
         "rules":            dict(DETECTION_ENABLED),
@@ -1841,15 +1748,6 @@ def system_stats():
 # ==========================================
 # SESSION OWNERSHIP
 # ==========================================
-# Every session belongs to the account that created it (table session_owners in
-# users.db).  A signed-in user can only list, open, play back, dismiss flags on
-# or delete their own sessions; anything else returns 404, so one account can't
-# even tell that another account's session exists.
-#
-# There is still ONE live session for the whole app (cameras, ARM/PAUSE and the
-# live feed are global).  Only the owner of that live session can use those
-# controls; another account has to create its own session first, which is only
-# possible while monitoring is paused.
 from flask import abort
 from auth import (user_count, first_user_id, get_session_owner, set_session_owner,
                   remove_session_owner, list_owned_sessions)
@@ -1965,14 +1863,9 @@ def _guard_session_access():
     return None
 
 
-# Sessions that predate ownership go to the first account.
-_assign_unowned_sessions(first_user_id())
+_assign_unowned_sessions(first_user_id())  # pre-existing sessions inherit to first account
 
 
 if __name__ == '__main__':
-    # debug=False: the reloader can double-import this module and double-open
-    # cameras.  threaded=True: each /video_feed is a long-lived connection.
-    # Default host is localhost only; set CERBERUS_HOST=0.0.0.0 to allow
-    # other devices on the network to reach the dashboard.
     app.run(debug=False, threaded=True,
             host=os.environ.get("CERBERUS_HOST", "127.0.0.1"), port=5000)

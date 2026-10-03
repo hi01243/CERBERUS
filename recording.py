@@ -1,15 +1,3 @@
-"""
-recording.py -- session recording + incident index for CERBERUS.
-
-The video is the evidence. Each camera writes one file per ARM..PAUSE run.
-A violation is an INCIDENT (student, type, start/end offset into that
-video), not a photo: repeated triggers for the same student + type within
-INCIDENT_GAP_SEC extend the open incident instead of creating a new one.
-One small thumbnail is kept per incident, for the review list.
-
-Offsets are frames_written / RECORD_FPS, never wall-clock, so they always
-line up with playback even if the detection loop stalls.
-"""
 import os
 import shutil
 import sqlite3
