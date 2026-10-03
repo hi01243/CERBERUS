@@ -120,32 +120,6 @@ Duplicate ("ghost") skeletons are filtered out before they touch any timer, and 
 
 ---
 
-## Recent changes
-
-Current build: `2026-10-03-r17-three-rules-mfa`
-
-**Detection**
-- Rules simplified to exactly three: phone, reach, gaze. The student-interaction (proximity) check was removed because gaze and reach already cover it.
-- Added the wrist-crop phone pass for small phones held in hands.
-- Added static-object filtering for seat plates and other stationary false positives.
-- Added the duplicate-skeleton filter and a track-age gate so brand-new tracks cannot trigger flags.
-- Reach detection now includes an arm-extension test, same-row, depth-ratio, and side-gap checks.
-- Head-pose improvements: median-based calibration, a looking-down exemption, a strong-turn override, a grace period for blinks and noisy frames, and automatic re-baselining.
-- Camera-bump detection and recalibration.
-
-**Platform**
-- Dynamic camera registry (local, IP/RTSP, video file) with add, activate, pause, and remove from the dashboard.
-- Per-exam sessions, a sessions browser, and a review page with timeline, dismiss, filters, and multi-camera grouping.
-- Live `/settings` rule toggles, logged with the username.
-- Crash recovery for half-written recordings.
-
-**Security**
-- Per-user accounts with invite-code sign-up.
-- Optional TOTP authenticator MFA at sign-in, with setup and disable pages.
-- MFA and typed confirmation required for deleting sessions or resetting data.
-
----
-
 ## Project structure
 
 ```
