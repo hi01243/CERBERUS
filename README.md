@@ -193,7 +193,6 @@ All routes except `/login`, `/signup`, and static files require sign-in.
 ## Known limitations
 
 - Subtle phone use is still easy to miss, and a phone under a desk or in a lap may not be seen.
-- Cheat sheets and paper notes are not detected yet.
 - Reach and gaze use 2D geometry from one camera angle, so overlapping students at different depths can confuse them.
 - Matching a phone to a student is a best-effort nearest-shoulder guess, not verified possession.
 - Calculators and some watches can be flagged as phones, so use the Phone rule toggle.
