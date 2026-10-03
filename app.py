@@ -21,7 +21,7 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
 
-BUILD_ID = "2026-09-30-r15-username-mfa"
+BUILD_ID = "2026-10-03-r17-three-rules-mfa"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -49,20 +49,16 @@ monitoring_active = False   # session-wide arm/disarm (the ARM/PAUSE buttons)
 HEAD_TURN_RATIO_THRESHOLD = 0.45  # horizontal nose-displacement ratio, not a raw angle
 GAZE_DURATION_THRESHOLD = 3.0
 SPINE_TILT_THRESHOLD_DEG = 25.0
-PROXIMITY_MULTIPLIER = 1.8
-INTERACTION_DURATION_THRESHOLD = 3.0
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SMOOTHING_WINDOW = 5
 
 # --- DETECTION RULE SWITCHES (change live via POST /settings) ---
-# Per-exam rules.  A regular watch or an allowed calculator looks like a
-# "smartwatch" / "cell phone" to YOLO, so turn those off when the exam allows
-# them.  Interaction (shoulder proximity) is OFF by default: it has no
-# ground-truth class in the test dataset and fires on normal seating.
+# Per-exam rules.  Exactly three rules exist: phone, reach, gaze.  An allowed
+# calculator can look like a "cell phone" to YOLO, so turn "phone" off when the
+# exam allows them.
 DETECTION_ENABLED = {
     "phone":       True,
-    "watch":       False,
     "reach":       True,
     "gaze":        True,
 }
@@ -74,7 +70,7 @@ WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
 WRIST_CROP_IMGSZ        = 320    # crops are upscaled to this before inference
-WRIST_CROP_CONF         = 0.30   # lower than the full-frame 0.45; persistence compensates
+WRIST_CROP_CONF         = 0.50   # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
 WRIST_CROP_MIN_HITS     = 3      # hits needed ...
@@ -112,15 +108,12 @@ REPOSITION_STABILITY_WINDOW = 10.0  # student must hold a new position this long
 REPOSITION_JUMP_LIMIT = HEAD_TURN_RATIO_THRESHOLD * 0.8
 REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 
-# --- SMARTWATCH / WALL-CLOCK FILTER ---
-# YOLO class 74 ("clock") fires on both smartwatches AND wall clocks.
-#   A. Static guard: a clock that hasn't moved in STATIC_CLOCK_SEC is a wall clock.
-#   B. Wrist guard: a clock must be near a visible wrist to count as worn.
-# Cell-phone detections (class 67) bypass both guards.
+# --- STATIC-OBJECT FILTER (phones) ---
+# Seat plates / furniture that never move are not phones.  The tracker
+# (_check_static_clocks) is shared by the full-frame and wrist-crop phone passes.
 STATIC_CLOCK_SEC       = 8.0
 STATIC_CLOCK_RADIUS_PX = 60
 STATIC_CLOCK_MOVE_PX   = 35
-WRIST_PROXIMITY_PX     = 150
 WRIST_CROP_MAX_WRIST_DIST  = 0.6   # phone centre must be within this x shoulder width of the wrist
 WRIST_CROP_STATIC_SEC      = 6.0   # a wrist-crop 'phone' this still ...
 WRIST_CROP_STATIC_MOVE_PX  = 8     # ... (moves less than this) is furniture
@@ -202,8 +195,8 @@ camera_registry = {}
 registry_lock = threading.Lock()
 _next_camera_num = 1
 
-# COCO class 67 = cell phone, 74 = clock (smartwatch proxy)
-PROHIBITED_CLASSES = {67: "CELL PHONE", 74: "SMARTWATCH"}
+# COCO class 67 = cell phone (the only prohibited object class)
+PROHIBITED_CLASSES = {67: "CELL PHONE"}
 
 
 def _generate_camera_id():
@@ -238,7 +231,6 @@ def add_camera(source, cam_type, label=None):
         "lock":     threading.Lock(),
         "gaze_timers":        {},
         "turn_history":       {},
-        "interaction_timers": {},
         "reach_timers":       {},
         "recorder":  SessionRecorder(CURRENT_SESSION, cam_id),
         "incidents": IncidentTracker(),
@@ -312,7 +304,7 @@ PER_TRACK_KEYS = ("gaze_timers", "turn_history", "baseline_ratio", "calibration_
 
 def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
-    for key in PER_TRACK_KEYS + ("interaction_timers", "reach_timers", "static_objects", "static_phones", "static_wc"):
+    for key in PER_TRACK_KEYS + ("reach_timers", "static_objects", "static_phones", "static_wc"):
         entry[key].clear()
 
 
@@ -715,7 +707,6 @@ def _detection_loop(camera_id):
 
             gaze_timers      = entry["gaze_timers"]
             turn_history     = entry["turn_history"]
-            pair_timers      = entry["interaction_timers"]
             reach_timers     = entry["reach_timers"]
             baseline_ratio   = entry["baseline_ratio"]
             calib_start      = entry["calibration_start"]
@@ -742,7 +733,6 @@ def _detection_loop(camera_id):
                 continue
 
             object_violation      = False
-            interaction_violation = False
             reach_violation       = False
             gaze_trigger          = False
             violation_reason      = ""
@@ -754,13 +744,13 @@ def _detection_loop(camera_id):
             # ==========================================
             object_detections = []
             try:
-                obj_results = entry["object_model"](frame, stream=True, verbose=False)
+                obj_results = entry["object_model"](frame, stream=True, verbose=False, classes=[67])
                 for r in obj_results:
                     for box in r.boxes:
                         cls_id     = int(box.cls[0])
                         confidence = float(box.conf[0])
                         if (cls_id in PROHIBITED_CLASSES and confidence > 0.45
-                                and DETECTION_ENABLED["phone" if cls_id == 67 else "watch"]):
+                                and DETECTION_ENABLED["phone"]):
                             x1, y1, x2, y2 = map(int, box.xyxy[0])
                             object_detections.append({
                                 "name":       PROHIBITED_CLASSES[cls_id],
@@ -776,7 +766,6 @@ def _detection_loop(camera_id):
             # ==========================================
             students        = []
             active_ids      = []
-            wrist_positions = []
 
             try:
                 pose_results = entry["pose_model"].track(
@@ -857,12 +846,6 @@ def _detection_loop(camera_id):
                         nose_confident = c_nose  >= MIN_KEYPOINT_CONF
                         hips_confident = (c_lhip >= MIN_KEYPOINT_CONF and
                                           c_rhip >= MIN_KEYPOINT_CONF)
-
-                        # Collect visible wrists for clock guard B.
-                        if c_lwrist >= MIN_KEYPOINT_CONF and l_wrist[0] > 0:
-                            wrist_positions.append((int(l_wrist[0]), int(l_wrist[1])))
-                        if c_rwrist >= MIN_KEYPOINT_CONF and r_wrist[0] > 0:
-                            wrist_positions.append((int(r_wrist[0]), int(r_wrist[1])))
 
                         shoulder_center = (int((l_shoulder[0] + r_shoulder[0]) / 2),
                                            int((l_shoulder[1] + r_shoulder[1]) / 2))
@@ -1111,13 +1094,8 @@ def _detection_loop(camera_id):
                     entry["turn_history"].clear()
 
             # ==========================================
-            # 2.5. SMARTWATCH FILTER
+            # 2.5. STATIC-PHONE FILTER
             # ==========================================
-            clock_dets    = [(i, d) for i, d in enumerate(object_detections)
-                             if d["name"] == "SMARTWATCH"]
-            clock_centers = [d["center"] for _, d in clock_dets]
-            suppressed    = _check_static_clocks(entry, clock_centers, current_time)
-
             # Stationary "phones" (seat-number plates etc.).  Wrist-crop detections carry
             # a track_id and are exempt.
             phone_dets = [(i, d) for i, d in enumerate(object_detections)
@@ -1130,46 +1108,13 @@ def _detection_loop(camera_id):
             accepted_detections = []
             for i, det in enumerate(object_detections):
                 x1, y1, x2, y2 = det["bbox"]
-
-                if det["name"] != "SMARTWATCH":
-                    if i in static_phone_idx and not _phone_in_hand(det, students):
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
-                        cv2.putText(frame, "STATIC OBJECT (suppressed)", (x1, max(y1 - 8, 12)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (70, 70, 70), 1)
-                        continue
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                    cv2.putText(frame, f"CELL PHONE ({det['confidence']*100:.0f}%)",
-                                (x1, max(y1 - 10, 20)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    accepted_detections.append(det)
-                    continue
-
-                ck_idx = next(j for j, (oi, _) in enumerate(clock_dets) if oi == i)
-
-                # Guard A: static position (wall clock).
-                if ck_idx in suppressed:
+                if i in static_phone_idx and not _phone_in_hand(det, students):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
-                    cv2.putText(frame, "STATIC CLOCK (suppressed)",
-                                (x1, max(y1 - 8, 12)),
+                    cv2.putText(frame, "STATIC OBJECT (suppressed)", (x1, max(y1 - 8, 12)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (70, 70, 70), 1)
                     continue
-
-                # Guard B: wrist proximity (only when students are visible).
-                if students and wrist_positions:
-                    near_wrist = any(
-                        math.hypot(det["center"][0] - wx,
-                                   det["center"][1] - wy) < WRIST_PROXIMITY_PX
-                        for wx, wy in wrist_positions
-                    )
-                    if not near_wrist:
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
-                        cv2.putText(frame, "CLOCK: no wrist nearby (suppressed)",
-                                    (x1, max(y1 - 8, 12)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (70, 70, 70), 1)
-                        continue
-
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(frame, f"SMARTWATCH ({det['confidence']*100:.0f}%)",
+                cv2.putText(frame, f"CELL PHONE ({det['confidence']*100:.0f}%)",
                             (x1, max(y1 - 10, 20)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 accepted_detections.append(det)
@@ -1206,7 +1151,6 @@ def _detection_loop(camera_id):
             # 4. INTERACTION & DESK LEANING / REACH DETECTION
             # ==========================================
             interaction_candidates = [s for s in students if s["track_id"] in established_ids]
-            active_pairs = []
             active_reach_pairs = []
             num_students = len(interaction_candidates)
             for i in range(num_students):
@@ -1262,8 +1206,6 @@ def _detection_loop(camera_id):
                                             (reach_wrist[0] - 20, max(20, reach_wrist[1] - 10)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2)
 
-            entry["interaction_timers"] = {k: v for k, v in pair_timers.items()
-                                           if k in active_pairs}
             # Keep a reach timer alive through brief keypoint dropouts.
             for k in [k for k, v in reach_timers.items()
                       if k not in active_reach_pairs
@@ -1278,9 +1220,6 @@ def _detection_loop(camera_id):
 
             if object_violation:
                 status_text  = f"ALERT: {violation_reason}!"
-                status_color = (0, 0, 255)
-            elif interaction_violation:
-                status_text  = "ALERT: STUDENTS INTERACTING!"
                 status_color = (0, 0, 255)
             elif reach_violation:
                 status_text  = "ALERT: SUSPECTED NOTE PASSING!"
@@ -1300,7 +1239,7 @@ def _detection_loop(camera_id):
             # ==========================================
             entry["recorder"].write(frame)
 
-            is_violating = object_violation or interaction_violation or reach_violation or gaze_trigger
+            is_violating = object_violation or reach_violation or gaze_trigger
 
             if is_violating:
                 inc, is_new = entry["incidents"].observe(
