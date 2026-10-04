@@ -144,6 +144,27 @@ def first_user_id():
     return rows[0]["m"] if rows else None
 
 
+def first_user_id_excluding(user_id):
+    rows = _q("SELECT MIN(id) AS m FROM users WHERE id != ?", (user_id,), fetch=True)
+    return rows[0]["m"] if rows else None
+
+
+def delete_user(user_id, replacement_session_id=None, replacement_owner_id=None):
+    with closing(sqlite3.connect(AUTH_DB, timeout=10)) as con:
+        con.execute("DELETE FROM session_owners WHERE user_id=?", (user_id,))
+        if replacement_session_id and replacement_owner_id is not None:
+            con.execute(
+                "INSERT OR REPLACE INTO session_owners (session_id, user_id) VALUES (?, ?)",
+                (replacement_session_id, replacement_owner_id),
+            )
+        cur = con.execute("DELETE FROM users WHERE id=?", (user_id,))
+        if cur.rowcount != 1:
+            con.rollback()
+            return False
+        con.commit()
+        return True
+
+
 def get_session_owner(session_id):
     rows = _q("SELECT user_id FROM session_owners WHERE session_id=?", (session_id,), fetch=True)
     return rows[0]["user_id"] if rows else None

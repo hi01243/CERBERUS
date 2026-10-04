@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERBERUS - Delete account</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+<style>
+  :root { --bg:var(--cerb-bg); --surface:var(--cerb-surface); --line:var(--cerb-line); --text:var(--cerb-text); --muted:var(--cerb-muted); --red:var(--cerb-red); }
+  body { min-height:100vh; margin:0; display:grid; place-items:center; padding:20px; background-color:var(--bg); background-image:linear-gradient(rgba(135,184,154,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(135,184,154,.035) 1px,transparent 1px); background-size:36px 36px; color:var(--text); font:14px/1.5 var(--cerb-font); }
+  main { width:min(100%,520px); padding:28px; border:1px solid var(--line); border-radius:6px; background:var(--surface); }
+  h1 { margin:0 0 10px; font-size:22px; }
+  p { color:var(--muted); }
+  .warning { margin:20px 0; padding:12px 14px; border-left:3px solid var(--red); background:var(--cerb-danger-surface); color:var(--text); }
+  label { display:block; margin:16px 0 6px; color:var(--muted); font-size:12px; }
+  input { width:100%; padding:10px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--text); font:inherit; }
+  button, a { display:inline-flex; align-items:center; justify-content:center; min-height:38px; margin-top:18px; padding:8px 13px; border:1px solid var(--line); border-radius:4px; background:transparent; color:var(--text); font:inherit; text-decoration:none; cursor:pointer; }
+  button { border-color:var(--red); background:var(--red); color:#211312; font-weight:700; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; }
+  .error, .blocked { color:var(--red); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Delete account</h1>
+  <p>This permanently deletes <strong>{{ username }}</strong> and all sessions, recordings, incident records, and evidence owned by this account.</p>
+  <p class="warning">This cannot be undone. Other accounts and their data will not be deleted.</p>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if active_owned_session %}
+    <p class="blocked">Stop monitoring before deleting this account.</p>
+  {% else %}
+    <form method="post" autocomplete="off">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="confirm-username">Type your username to confirm</label>
+      <input id="confirm-username" name="confirm_username" type="text" required spellcheck="false" autocomplete="off">
+      <label for="password">Current password</label>
+      <input id="password" name="password" type="password" required autocomplete="current-password">
+      {% if mfa_enabled %}
+        <label for="totp-code">Current authenticator code</label>
+        <input id="totp-code" name="totp_code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+      {% endif %}
+      <label for="confirm-phrase">Type {{ confirmation_phrase }} to confirm</label>
+      <input id="confirm-phrase" name="confirm_phrase" type="text" required spellcheck="false" autocomplete="off">
+      <div class="actions">
+        <button type="submit">Delete account and data</button>
+        <a href="/">Cancel</a>
+      </div>
+    </form>
+  {% endif %}
+</main>
+</body>
+</html>

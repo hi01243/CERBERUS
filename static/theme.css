@@ -1,0 +1,52 @@
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  src: url('fonts/PlusJakartaSans-Variable.woff2') format('woff2');
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('fonts/JetBrainsMono-Variable.woff2') format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --cerb-bg: #10151d;
+  --cerb-surface: #171f2a;
+  --cerb-raised: #202b38;
+  --cerb-line: #303c4a;
+  --cerb-text: #edf1f4;
+  --cerb-muted: #9aa8b4;
+  --cerb-green: #87b89a;
+  --cerb-green-soft: #1d3027;
+  --cerb-green-ink: #142019;
+  --cerb-amber: #efb84d;
+  --cerb-red: #e07971;
+  --cerb-danger-surface: #241a1d;
+  --cerb-font: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --cerb-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--cerb-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--cerb-amber);
+  outline-offset: 2px;
+}

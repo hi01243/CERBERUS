@@ -5,16 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CERBERUS - Sessions</title>
 <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
 
 <style>
-  :root { color-scheme: dark; --bg:#10151d; --surface:#171f2a; --raised:#202b38; --line:#303c4a; --text:#edf1f4; --muted:#9aa8b4; --green:#87b89a; --amber:#efb84d; --red:#e07971; }
+  :root { --bg:var(--cerb-bg); --surface:var(--cerb-surface); --raised:var(--cerb-raised); --line:var(--cerb-line); --text:var(--cerb-text); --muted:var(--cerb-muted); --green:var(--cerb-green); --amber:var(--cerb-amber); --red:var(--cerb-red); }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 'Plus Jakarta Sans',sans-serif; }
-  header { min-height:64px; padding:12px clamp(18px,4vw,56px); display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); background:#141b24; }
-  .brand { display:flex; align-items:center; gap:12px; font-weight:700; letter-spacing:.04em; }
-  .brand-mark { width:24px; height:24px; border:2px solid var(--green); border-radius:7px 7px 7px 2px; transform:rotate(-8deg); }
-  .header-actions { display:flex; align-items:center; gap:12px; color:var(--muted); font-size:12px; }
-  .header-actions a { color:var(--text); text-decoration:none; }
+  .site-header { position:sticky; top:0; z-index:20; min-height:72px; padding:12px clamp(18px,4vw,56px); display:flex; align-items:center; justify-content:space-between; gap:20px; border-bottom:1px solid var(--line); background:rgba(20,27,36,.96); backdrop-filter:blur(12px); }
+  .brand { display:flex; align-items:center; gap:10px; color:var(--text); text-decoration:none; flex:none; }
+  .brand-copy { display:flex; flex-direction:column; line-height:1.15; }
+  .brand-name { font-size:14px; font-weight:800; letter-spacing:.08em; }
+  .brand-context { margin-top:4px; color:var(--muted); font:9px 'JetBrains Mono',monospace; letter-spacing:.08em; }
+  .header-right, .primary-nav, .account-actions { display:flex; align-items:center; }
+  .header-right { justify-content:flex-end; gap:16px; min-width:0; }
+  .primary-nav { gap:3px; padding:4px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+  .primary-nav a { padding:7px 12px; border:1px solid transparent; border-radius:4px; color:var(--muted); font-size:12px; text-decoration:none; transition:background .16s ease,color .16s ease,border-color .16s ease; }
+  .primary-nav a:hover { color:var(--text); }
+  .primary-nav a[aria-current="page"] { border-color:#3d574a; background:#1d3027; color:#c1e2cd; }
+  .account-actions { gap:10px; }
+  .user-chip { display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; color:var(--text); font-size:12px; }
+  .user-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 8px rgba(135,184,154,.45); }
+  .account-link, .delete-account-link { color:var(--muted); font-size:11px; text-decoration:none; white-space:nowrap; }
+  .account-link:hover { color:var(--text); }
+  .delete-account-link { color:#d99088; }
+  .delete-account-link:hover { color:var(--red); }
+  .signout-form { margin:0; }
+  .signout-button { min-height:34px; padding:6px 10px; background:transparent; font-size:11px; }
   button, input { font:inherit; }
   button, .button { display:inline-flex; justify-content:center; align-items:center; gap:8px; min-height:38px; border:1px solid var(--line); border-radius:5px; padding:8px 13px; background:var(--raised); color:var(--text); text-decoration:none; cursor:pointer; }
   button:hover, .button:hover { border-color:var(--green); }
@@ -50,18 +66,29 @@
   .file-preview { overflow:hidden; color:var(--muted); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
   .open-label { color:var(--green); font-size:12px; white-space:nowrap; }
   .empty { padding:34px 8px; color:var(--muted); }
-  @media(max-width:760px) { .intro { grid-template-columns:1fr; align-items:start; } .session-row { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; } .folder-title,.file-preview { grid-column:1/-1; } .session-open { text-align:right; } .header-actions { gap:8px; } }
-  @media(max-width:480px) { .header-actions .user-name { display:none; } .new-session { flex-direction:column; } .new-session input { width:100%; } .start-actions > * { flex:1; } h1 { font-size:26px; } }
+  @media(max-width:900px) { .site-header { align-items:flex-start; flex-wrap:wrap; } .header-right { flex:1; flex-wrap:wrap; } }
+  @media(max-width:760px) { .intro { grid-template-columns:1fr; align-items:start; } .session-row { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; } .folder-title,.file-preview { grid-column:1/-1; } .session-open { text-align:right; } .header-right { justify-content:space-between; gap:10px; } .account-actions { flex-wrap:wrap; justify-content:flex-end; } }
+  @media(max-width:480px) { .site-header { padding:12px 14px; gap:12px; } .brand-context { display:none; } .header-right { flex-basis:100%; } .user-name { display:none; } .account-actions { gap:8px; } .account-link,.delete-account-link { font-size:10px; } .new-session { flex-direction:column; } .new-session input { width:100%; } .start-actions > * { flex:1; } h1 { font-size:26px; } }
 </style>
 </head>
 <body>
-<header>
-  <div class="brand"><img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="28" style="display:block;height:28px;width:auto"><span>CERBERUS</span></div>
-  <nav class="header-actions" aria-label="Account">
-    <span class="user-name">{{ session.get('username', '-') }}</span>
-    <a href="/security/mfa">{% if mfa_enabled %}Manage MFA{% else %}Enable faster MFA{% endif %}</a>
-    <form action="/logout" method="post"><button type="submit">Sign out</button></form>
-  </nav>
+<header class="site-header">
+  <a class="brand" href="/" aria-label="CERBERUS sessions">
+    <img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="30" style="display:block;height:30px;width:auto">
+    <span class="brand-copy"><span class="brand-name">CERBERUS</span><span class="brand-context">EXAM CONTROL</span></span>
+  </a>
+  <div class="header-right">
+    <nav class="primary-nav" aria-label="Primary navigation">
+      <a href="/" aria-current="page">Sessions</a>
+      <a href="/monitor">Monitor</a>
+    </nav>
+    <div class="account-actions">
+      <span class="user-chip"><span class="user-dot" aria-hidden="true"></span><span class="user-name">{{ session.get('username', '-') }}</span></span>
+      <a class="account-link" href="/security/mfa">{% if mfa_enabled %}MFA settings{% else %}Set up MFA{% endif %}</a>
+      <a class="delete-account-link" href="/account/delete">Delete account</a>
+      <form class="signout-form" action="/logout" method="post"><button class="signout-button" type="submit">Sign out</button></form>
+    </div>
+  </div>
 </header>
 <main>
   <section class="intro">
@@ -89,7 +116,6 @@
 <script>
 const currentSession = {{ current_session|tojson }};
 const monitoringActive = {{ monitoring_active|tojson }};
-const mfaEnabled = {{ mfa_enabled|tojson }};
 const list = document.getElementById('session-list');
 const notice = document.getElementById('action-notice');
 let sessions = [];
@@ -153,28 +179,17 @@ function renderSessions() {
 }
 
 async function deleteSession(sessionId, button) {
-  if (!mfaEnabled) {
-    if (confirm('Enable authenticator MFA before deleting sessions?')) location.href = '/security/mfa';
-    return;
-  }
-  if (!confirm(`Permanently delete all recordings and flags for "${sessionId}"?`)) return;
   button.disabled = true;
   notice.textContent = 'Confirming deletion...';
   try {
-    const code = prompt('Enter the current six-digit code from your authenticator app:');
-    if (!code || !/^\d{6}$/.test(code.trim())) { button.disabled = false; notice.textContent = 'Deletion cancelled.'; return; }
-    const confirmation = prompt(`Type the session name exactly to confirm deletion:\n${sessionId}`);
+    const confirmation = prompt(`Permanently delete all recordings and flags for "${sessionId}"?\n\nType the session name exactly to confirm:`);
     if (confirmation !== sessionId) { button.disabled = false; notice.textContent = 'Session name did not match; deletion cancelled.'; return; }
     const response = await fetch(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: code.trim(), confirm: confirmation })
+      body: JSON.stringify({ confirm: confirmation })
     });
     const result = await response.json();
     if (!response.ok) {
-      if (result.setup_mfa && confirm(`${result.message}\n\nOpen MFA setup now?`)) {
-        location.href = '/security/mfa';
-        return;
-      }
       throw new Error(result.message || 'Could not delete session.');
     }
     notice.textContent = `Deleted ${sessionId}.`;

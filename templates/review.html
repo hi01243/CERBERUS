@@ -5,16 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CERBERUS - Incident review</title>
 <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
 <style>
-  :root { --bg:#12141a; --panel:#1b1f28; --line:#2c3240; --text:#e7e9ee; --muted:#8e97a8; --flag:#f2b134; --dim:#3a4050; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; }
-  header { display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1px solid var(--line); }
-  header h1 { margin:0; font-size:16px; font-weight:600; }
-  button, header a { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 12px; font:inherit; text-decoration:none; cursor:pointer; }
+  :root { --bg:var(--cerb-bg); --panel:var(--cerb-surface); --line:var(--cerb-line); --text:var(--cerb-text); --muted:var(--cerb-muted); --flag:var(--cerb-amber); --dim:#59646b; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 var(--cerb-font); }
+  header { position:sticky; top:0; z-index:10; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:12px clamp(14px,3vw,28px); border-bottom:1px solid var(--line); background:rgba(23,31,42,.96); backdrop-filter:blur(12px); }
+  header h1 { display:flex; align-items:center; min-width:0; margin:0; font-size:14px; font-weight:600; }
+  .review-nav { display:flex; align-items:center; gap:5px; padding:4px; border:1px solid var(--line); border-radius:6px; background:var(--cerb-bg); }
+  button, .review-nav a, .review-current { min-height:34px; display:inline-flex; align-items:center; justify-content:center; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:4px; padding:6px 11px; font:inherit; font-size:12px; text-decoration:none; cursor:pointer; }
+  .review-nav a { border-color:transparent; background:transparent; color:var(--muted); }
+  .review-nav a:hover { color:var(--text); }
+  .review-current { border-color:#6e5720; background:#322916; color:var(--flag); cursor:default; }
   button:focus-visible, .card:focus-visible, .mark:focus-visible { outline:2px solid var(--flag); outline-offset:2px; }
   main { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:16px; padding:16px 20px; }
   @media (max-width:900px) { main { grid-template-columns:1fr; } }
+  @media (max-width:560px) { header { flex-wrap:wrap; } header h1 { width:100%; } .review-nav { margin-left:auto; } }
   video { width:100%; max-height:62vh; background:#000; border-radius:8px; }
   #timeline { position:relative; height:28px; margin-top:10px; background:var(--panel); border:1px solid var(--line); border-radius:6px; }
   .mark { position:absolute; top:4px; bottom:4px; min-width:5px; background:var(--flag); border:0; padding:0; border-radius:2px; }
@@ -50,7 +55,12 @@
 <body>
 <header>
   <h1><img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="26" style="display:inline-block;height:26px;width:auto;vertical-align:middle;margin-right:10px">Session: {{ session_id }}</h1>
-  <div><button id="refresh">Refresh</button> <a href="/monitor">Monitor</a> <a href="/">Sessions</a></div>
+  <nav class="review-nav" aria-label="Primary navigation">
+    <a href="/">Sessions</a>
+    <a href="/monitor">Monitor</a>
+    <span class="review-current" aria-current="page">Review</span>
+    <button id="refresh" type="button">Refresh</button>
+  </nav>
 </header>
 <div id="filters">
   <button class="active" data-filter="all">All</button>
