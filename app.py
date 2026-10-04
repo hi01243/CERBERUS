@@ -19,7 +19,8 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        list_incidents, list_incident_sessions, clear_incidents, dismiss_incident,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
-                  generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
+                  generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
+                  delete_user)
 
 BUILD_ID = "2026-10-04-r26-pen-size"
 print(f"[cerberus] app.py build {BUILD_ID}")
@@ -1323,6 +1324,8 @@ def _require_login():
         return
     if request.endpoint == "static":
         return _guard_static()
+    if session.get("user_id") is not None and not get_user_by_id(session["user_id"]):
+        session.clear()
     if not session.get("user_id"):
         return redirect(url_for("login"))
     return _guard_session_access()
@@ -1415,6 +1418,71 @@ def disable_mfa():
         return jsonify({'message': 'Authenticator code is invalid or expired.'}), 403
     save_totp_secret(user_id, None)
     return jsonify({'status': 'disabled'})
+
+
+@app.route('/account/delete', methods=['GET', 'POST'])
+def delete_account():
+    confirmation_phrase = 'DELETE ACCOUNT'
+    user_id = session.get('user_id')
+    user = get_user_by_id(user_id)
+    if not user:
+        session.clear()
+        return redirect(url_for('login'))
+
+    csrf_token = session.get('account_delete_csrf_token')
+    if not csrf_token:
+        csrf_token = secrets.token_urlsafe(32)
+        session['account_delete_csrf_token'] = csrf_token
+
+    current_owned = get_session_owner(CURRENT_SESSION) == user_id
+    active_owned_session = bool(monitoring_active and current_owned)
+    mfa_secret = get_totp_secret(user_id)
+
+    def render_page(error=None, status=200):
+        return render_template(
+            'delete_account.html', username=user['username'], csrf_token=csrf_token,
+            active_owned_session=active_owned_session, mfa_enabled=bool(mfa_secret),
+            confirmation_phrase=confirmation_phrase, error=error,
+        ), status
+
+    if request.method == 'GET':
+        return render_page()
+
+    submitted_token = request.form.get('csrf_token', '')
+    if not secrets.compare_digest(csrf_token, submitted_token):
+        return render_page('This request expired. Reload the page and try again.', 400)
+    if request.form.get('confirm_username') != user['username'] or not verify_user(
+            user['username'], request.form.get('password', '')):
+        return render_page('The username confirmation or password is incorrect.', 400)
+    if request.form.get('confirm_phrase') != confirmation_phrase:
+        return render_page(f'Type "{confirmation_phrase}" exactly to confirm deletion.', 400)
+    if mfa_secret and not verify_totp(mfa_secret, request.form.get('totp_code')):
+        return render_page('The authenticator code is invalid or expired.', 400)
+    if active_owned_session:
+        return render_page('Stop monitoring before deleting this account.', 400)
+
+    owned_sessions = set(list_owned_sessions(user_id))
+    if current_owned:
+        owned_sessions.add(CURRENT_SESSION)
+
+    try:
+        for session_id in owned_sessions:
+            if _valid_session_id(session_id):
+                _delete_session_data(session_id)
+
+        replacement_owner = first_user_id_excluding(user_id)
+        if not delete_user(
+                user_id,
+                replacement_session_id=CURRENT_SESSION if current_owned else None,
+                replacement_owner_id=replacement_owner):
+            raise RuntimeError('Account record was not deleted.')
+    except Exception as error:
+        print(f"[account] could not delete account #{user_id}: {error}")
+        return render_page('Account deletion could not be completed. Some session data may already have been removed.', 500)
+
+    print(f"[account] {user['username']} deleted their account and {len(owned_sessions)} owned session(s)")
+    session.clear()
+    return redirect(url_for('login'))
 
 
 @app.route('/logout', methods=['POST'])
@@ -1849,8 +1917,9 @@ def system_stats():
 # SESSION OWNERSHIP
 # ==========================================
 from flask import abort
-from auth import (user_count, first_user_id, get_session_owner, set_session_owner,
-                  remove_session_owner, list_owned_sessions)
+from auth import (user_count, first_user_id, first_user_id_excluding,
+                  get_session_owner, set_session_owner, remove_session_owner,
+                  list_owned_sessions)
 
 LIVE_ENDPOINTS = {
     "monitor", "video_feed", "get_session_route", "settings_route", "system_stats",
