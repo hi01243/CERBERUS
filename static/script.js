@@ -10,11 +10,16 @@ updateClock();
 // CAMERA MANAGEMENT
 // ==========================================
 
+// Escape user-entered text (camera labels) before putting it in innerHTML.
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 let cachedCameraSignature = "";
 
 async function loadCameras() {
     try {
         const res = await fetch('/cameras');
+        if (res.status === 403) { location.href = '/'; return; }
         if (!res.ok) return;
         const cameras = await res.json();
 
@@ -47,7 +52,7 @@ function renderCameraGrid(cameras) {
         const isPaused = cam.status === "paused";
 
         const mediaHtml = isActive
-            ? `<img src="/video_feed/${cam.id}" class="video-feed" alt="Camera ${cam.label}">`
+            ? `<img src="/video_feed/${cam.id}" class="video-feed" alt="Camera ${esc(cam.label)}">`
             : `<div class="camera-placeholder">
                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                        <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>
@@ -61,7 +66,7 @@ function renderCameraGrid(cameras) {
 
         return `
         <div class="camera-tile">
-            <span class="camera-tile-label">${cam.label}</span>
+            <span class="camera-tile-label">${esc(cam.label)}</span>
             <span class="camera-status-badge status-${cam.status}">${cam.status.toUpperCase()}</span>
             ${mediaHtml}
             <div class="camera-tile-controls">
@@ -207,6 +212,17 @@ async function startMonitoring() {
     }
 }
 
+async function recalibrate() {
+    try {
+        const res = await fetch('/recalibrate', { method: 'POST' });
+        if (res.status === 403) { location.href = '/'; return; }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+        console.error("Recalibrate failed:", err);
+        alert("Could not recalibrate -- check the console.");
+    }
+}
+
 async function stopMonitoring() {
     try {
         await fetch('/stop_monitoring', { method: 'POST' });
@@ -216,7 +232,7 @@ async function stopMonitoring() {
     }
 }
 
-// Fix 9: destructive action -- wipes DB rows, recordings, and evidence
+// destructive action -- wipes DB rows, recordings, and evidence
 // photos for the whole session, across every camera. A single-click
 // confirm() was too easy to fire by accident, so the operator must now
 // TYPE the exact phrase the backend also checks (see RESET_CONFIRM_PHRASE
@@ -286,7 +302,7 @@ async function resetSession() {
 }
 
 // ==========================================
-// PER-EXAM SESSIONS (Fix 10)
+// PER-EXAM SESSIONS
 // ==========================================
 
 async function loadSessionId() {
@@ -337,6 +353,7 @@ async function promptNewSession() {
 async function loadStats() {
     try {
         const res = await fetch('/system_stats');
+        if (res.status === 403) { location.href = '/'; return; }
         if (!res.ok) return;
         const data = await res.json();
 
@@ -373,6 +390,7 @@ let activeFilter = "ALL";
 async function loadViolations() {
     try {
         const res = await fetch('/get_violations');
+        if (res.status === 403) { location.href = '/'; return; }
         if (!res.ok) return;
         const data = await res.json();
 

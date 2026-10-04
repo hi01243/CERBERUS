@@ -83,13 +83,18 @@ const sessionId = {{ session_id|tojson }};
 // grouped for display only; nothing in the underlying data is merged or
 // deleted, so each camera's own evidence and dismiss state stay intact.
 const GROUP_WINDOW_SEC = 5;
+// Only group incidents across cameras if the cameras overlap the same seats.
+// With cameras covering different blocks, grouping would merge unrelated events.
+const GROUP_ACROSS_CAMERAS = false;
+// SQLite CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS"; this parses everywhere (incl. Safari).
+const ts = inc => new Date(String(inc.created_at).replace(' ', 'T') + 'Z').getTime();
 
 const player = document.getElementById('player');
 const listEl = document.getElementById('list');
 const recordingListEl = document.getElementById('recording-list');
 const timeline = document.getElementById('timeline');
 const note = document.getElementById('note');
-let incidents = [], groups = [], current = null, listFilter = 'all';
+let incidents = [], groups = [], current = null, currentRecording = null, listFilter = 'all';
 
 const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const label = t => t.replaceAll('_', ' ').toLowerCase();
@@ -132,6 +137,7 @@ function renderRecordings(recordings) {
       document.querySelectorAll('.recording-item').forEach(item => item.classList.remove('active'));
       button.classList.add('active');
       current = null;
+      currentRecording = recording.path;
       player.src = recording.url;
       note.textContent = 'Select a flag to jump to its point in this recording.';
       drawTimeline();
@@ -146,14 +152,17 @@ function renderRecordings(recordings) {
 // violation_type close together still only joins once per group (its
 // later trigger is its own separate incident already, not a duplicate).
 function groupIncidents(list) {
-  const sorted = [...list].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const sorted = [...list].sort((a, b) => ts(a) - ts(b));
+  if (!GROUP_ACROSS_CAMERAS) {
+    return sorted.map(inc => ({ violation_type: inc.violation_type, members: [inc] }));
+  }
   const out = [];
   for (const inc of sorted) {
-    const t = new Date(inc.created_at).getTime();
+    const t = ts(inc);
     const openGroup = out.find(g =>
       g.violation_type === inc.violation_type &&
       !g.members.some(m => m.camera_id === inc.camera_id) &&
-      (t - new Date(g.members[0].created_at).getTime()) / 1000 <= GROUP_WINDOW_SEC
+      (t - ts(g.members[0])) / 1000 <= GROUP_WINDOW_SEC
     );
     if (openGroup) openGroup.members.push(inc);
     else out.push({ violation_type: inc.violation_type, members: [inc] });
@@ -222,12 +231,16 @@ function render() {
         e.stopPropagation();
         dismissBtn.disabled = true;
         try {
-          await fetch(`/incidents/${primary.id}/dismiss`, { method: 'POST' });
-          primary.dismissed = 1;
+          for (const m of g.members) {
+            const res = await fetch(`/incidents/${m.id}/dismiss`, { method: 'POST' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            m.dismissed = 1;
+          }
           render();
           drawTimeline();
         } catch (err) {
           console.error('Dismiss failed:', err);
+          alert('Could not dismiss this flag.');
           dismissBtn.disabled = false;
         }
       };
@@ -243,6 +256,7 @@ function render() {
 
 function openIncident(inc) {
   current = inc;
+  currentRecording = inc.recording;
   for (const c of listEl.children) {
     c.setAttribute('aria-current', String(c.dataset.ids.split(',').includes(String(inc.id))));
   }
@@ -259,8 +273,8 @@ function openIncident(inc) {
 
 function drawTimeline() {
   timeline.innerHTML = '';
-  if (!current || !player.duration) return;
-  for (const inc of incidents.filter(i => i.recording === current.recording)) {
+  if (!currentRecording || !player.duration) return;
+  for (const inc of incidents.filter(i => i.recording === currentRecording)) {
     const m = document.createElement('button');
     m.className = 'mark' + (inc.dismissed ? ' dismissed' : '');
     m.title = `${label(inc.violation_type)} at ${fmt(inc.start_offset)}${inc.dismissed ? ' (dismissed)' : ''}`;

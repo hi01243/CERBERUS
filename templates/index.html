@@ -4,14 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CERBERUS AI — Exam Proctoring Dashboard</title>
-<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
-    
-    <!-- Modern Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    
-    <!-- Link to static/style.css -->
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -27,7 +20,7 @@
         </div>
 
         <div class="header-right">
-            <!-- Fix 10: per-exam sessions. Shows the current session name and
+            <!-- per-exam sessions. Shows the current session name and
                  lets the operator start a fresh one between exams so two
                  exams the same day don't share recordings/incidents. -->
             <div class="meta-tag session-tag">
@@ -146,6 +139,7 @@
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                         PAUSE SYSTEM
                     </button>
+                    <button class="btn" onclick="recalibrate()" title="Re-learn every student's neutral pose (keeps the recording running)">RECALIBRATE</button>
                     <a href="/review" target="_blank" class="btn" style="text-decoration:none;">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
                         REVIEW RECORDINGS
@@ -155,7 +149,7 @@
                 <!-- Reset is separated visually from Arm/Pause since it's
                      destructive and irreversible -- deletes DB rows AND
                      evidence photos for the whole session (all cameras).
-                     Fix 9: a single click here is no longer enough; the
+                     a single click here is no longer enough; the
                      operator must type a confirmation phrase (see script.js). -->
                 <div class="danger-zone">
                     <button class="btn btn-reset" onclick="resetSession()">

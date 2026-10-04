@@ -1,3 +1,5 @@
+@font-face { font-family: 'Plus Jakarta Sans'; src: url('fonts/PlusJakartaSans-Variable.woff2') format('woff2'); font-weight: 200 800; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono-Variable.woff2') format('woff2'); font-weight: 100 800; font-display: swap; }
 :root {
     --bg-main: #0b0f17;
     --bg-surface: #121824;
@@ -334,7 +336,7 @@ body {
 .video-feed {
     width: 100%;
     flex: 1;
-    object-fit: cover;
+    object-fit: contain;
     min-height: 0;
 }
 
@@ -388,11 +390,12 @@ body {
     padding: 16px;
     background: var(--bg-surface);
     display: flex;
+    flex-wrap: wrap;
     gap: 12px;
 }
 
 .btn {
-    flex: 1;
+    flex:  1 1 160px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -400,6 +403,9 @@ body {
     padding: 12px 20px;
     border-radius: 8px;
     border: none;
+    background: var(--bg-card);      /* new */
+    color: var(--text-high);         /* new */
+    text-decoration: none;           /* new */
     font-weight: 700;
     font-size: 0.85rem;
     cursor: pointer;
@@ -483,7 +489,6 @@ body {
 .alert-item:hover { transform: translateX(3px); background: var(--bg-card-hover); }
 
 .alert-item.gaze { border-left-color: var(--accent-amber); }
-.alert-item.interaction { border-left-color: var(--accent-blue); }
 
 .alert-item h4 {
     font-size: 0.82rem;
