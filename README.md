@@ -22,11 +22,13 @@ It flags three things:
 - **Multiple cameras**: local webcams, IP/RTSP streams (for example a phone), and video files that loop for demos. Cameras are added from the dashboard without a restart
 - **Per-exam sessions**: each exam gets its own recordings and incidents, so two exams on the same day never mix
 - **Per-account session ownership**: every session belongs to the account that created it, and other accounts cannot see it.
+- **Recording in 5-minute files**: each camera saves to `recordings/<session>/<camera>/` at 10 fps and at most 960 px wide, and evidence images go to `static/violations/<session>/<camera>/`. A crash costs at most one file
+- **Incident grouping**: repeats of the same flag on the same student within 10 seconds are one incident, and students flagged at the same moment each get their own
 - **Review page**: play an incident from 5 seconds before the alert, jump around on an incident timeline, pick between recordings, filter active or dismissed flags, and dismiss false positives
 - **Multi-camera grouping**: the same violation seen by several cameras within 5 seconds shows as one card with a camera picker (display only; nothing is merged or deleted)
 - **Live rule toggles**: switch phone, reach, or gaze detection on or off per exam, for example when calculators are allowed
 - **Accounts and MFA**: username and password sign-up, optional authenticator-app (TOTP) MFA, and MFA-gated session deletion
-- **Crash recovery**: recordings left half-written by a crash or power loss are finalised on the next start so they stay playable
+- **Crash recovery**: recordings left half-written by a crash or power loss are finalised on the next start (a file cut off mid-write may still not play)
 
 ---
 
@@ -118,22 +120,23 @@ Both remove the session's database rows, recordings, and evidence images, and ca
 - Every frame, YOLO11n looks for COCO class 67 (cell phone) at confidence above 0.45.
 - A second **wrist-crop pass** runs about 3 times a second: it crops a zoomed window around each wrist and re-checks it, which catches small phones held in a hand. A phone is confirmed after 3 hits within 2 seconds, and it must be close to the wrist.
 - A **static-object filter** drops "phones" that never move (seat-number plates, furniture): 10 seconds for full-frame detections unless a hand is near, and 6 seconds for wrist-crop detections.
+- A **size filter** ignores boxes that are very small or long and thin compared with the student's shoulder width (typically a pen), and small boxes need at least 0.70 confidence.
 
 ### Gaze
 - Head turn is estimated from how far the nose sits sideways from the shoulder line, relative to shoulder width.
 - Each student gets a personal baseline from a 2-second calibration, and it adapts slowly if they settle into a new position.
-- A turn must pass 0.45 and last 2.5 seconds to be flagged. Looking down at a paper is excused unless the turn is very strong.
-- A held posture (flagged for 8 seconds) is treated as the new normal and re-baselined.
+- A turn must pass 0.55 and last 2.5 seconds to be flagged. Looking down at a paper is excused unless the turn is very strong.
+- A held posture (flagged for 8 seconds) is treated as the new normal and re-baselined. When the student returns close to their original position, the original baseline is restored, so turning back to their seat is not flagged as a turn the other way.
 - If most students turn at once, CERBERUS assumes the camera was bumped and recalibrates everyone.
 
 ### Reach (note passing)
 A hand-off is detected when either test passes for 1 second:
-- **Zone**: a wrist enters a circle around the neighbour's shoulders.
+- **Zone**: a wrist enters a circle around the neighbour's shoulders, while the hand is held away from its own owner and is closer to the neighbour than to them. A hand resting on its own desk does not count.
 - **Extension**: the arm is stretched out and the wrist has travelled toward the neighbour, which catches a paper passed across an aisle.
 
-Only students who are side by side, in the same row, and at a similar depth are paired, so someone reaching past a student in front or behind is not flagged. Duplicate ("ghost") skeletons are filtered out, and per-student state survives short tracking drops.
+Only students who are side by side, in the same row, and at a similar depth are paired, so someone reaching past a student in front or behind is not flagged. One hand-off between two students is logged as a single incident. Duplicate ("ghost") skeletons are filtered out, and per-student state survives short tracking drops.
 
-> All thresholds are hand-calibrated, not learned. Test with people seated at real exam spacing and tune the constants at the top of `app.py` before relying on it. Setting `DEBUG_OVERLAY = True` draws yaw and pitch numbers beside each student to help.POSE_IMGSZ can be raised (for example to 960) to help with small, distant students, at the cost of frame rate.
+> All thresholds are hand-calibrated, not learned. Test with people seated at real exam spacing and tune the constants at the top of `app.py` before relying on it. Setting `DEBUG_OVERLAY = True` draws yaw and pitch numbers beside each student, and a grey box with the shoulder confidences around anyone the model found but could not track. Pose detection runs at `POSE_IMGSZ = 960` with a low confidence cutoff (`POSE_CONF = 0.25`) so back-row students are picked up. Lower `POSE_IMGSZ` to 640 for more frame rate.
 
 ---
 
@@ -145,5 +148,4 @@ Only students who are side by side, in the same row, and at a similar depth are 
 - Calculators can be flagged as phones, so use the Phone rule toggle.
 - Small objects in the back rows of a large room are only a few pixels wide and will be missed.
 - Only one live session runs at a time, shared by the whole app.
-- Recordings contain the on-screen overlays and no clean copy is kept. Set `RECORD_RAW = True` in `app.py` to record the clean frame instead (the review page then shows no boxes).
 - Video lag on weaker machines. Run on a GPU or lower the number of cameras for large rooms.
