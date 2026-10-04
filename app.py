@@ -21,7 +21,8 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
 
-BUILD_ID = "2026-10-03-r18-session-owners"
+BUILD_ID = "2026-10-04-r19-patch"
+print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
 
@@ -37,8 +38,7 @@ CURRENT_SESSION = "SESSION_ROOM_A1"
 
 monitoring_active = False  # session-wide arm/disarm toggle
 HEAD_TURN_RATIO_THRESHOLD = 0.45  # horizontal nose-displacement ratio, not a raw angle
-GAZE_DURATION_THRESHOLD = 3.0
-SPINE_TILT_THRESHOLD_DEG = 25.0
+GAZE_DURATION_THRESHOLD = 2.5
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SMOOTHING_WINDOW = 5
@@ -72,6 +72,7 @@ GAZE_NEIGHBOR_ROW_MULT = 2.0  # max vertical offset between shoulder centers
 # --- POSE MODEL INFERENCE SETTINGS ---
 POSE_IOU  = 0.5
 POSE_CONF = 0.4
+POSE_IMGSZ = 640   # try 960 if back-row students are small and FPS allows
 
 # --- DUPLICATE-SKELETON (GHOST TRACK) FILTER ---
 DUPLICATE_DIST_MULTIPLIER = 0.8
@@ -128,6 +129,7 @@ GAZE_GRACE_SEC = 0.8
 GAZE_REBASELINE_SEC = 8.0
 TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
 DEBUG_OVERLAY = True        # draw yaw/pitch numbers on frame for threshold tuning
+RECORD_RAW = False   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
 
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
@@ -240,6 +242,8 @@ def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
+    for key in ("_wc_hits", "_wc_confirmed", "_wc_last", "last_turn", "_gaze_logged"):
+        entry.pop(key, None)
 
 
 def pause_camera(cam_id):
@@ -444,14 +448,6 @@ def _phone_in_hand(det, students):
             if wr is not None and math.hypot(cx - wr[0], cy - wr[1]) < lim:
                 return True
     return False
-
-
-def calculate_angle(p1, p2):
-    """Calculates the tilt angle of a 2D vector relative to the vertical line."""
-    dx = p2[0] - p1[0]
-    dy = p2[1] - p1[1]
-    rads = math.atan2(abs(dx), abs(dy))
-    return math.degrees(rads)
 
 
 def make_status_frame(label, message, sub_message=""):
@@ -708,6 +704,7 @@ def _detection_loop(camera_id):
                     stream=True,
                     verbose=False,
                     iou=POSE_IOU,
+                    imgsz=POSE_IMGSZ,
                     conf=POSE_CONF,
                 )
 
@@ -762,32 +759,21 @@ def _detection_loop(camera_id):
 
                         nose                   = person[0]
                         l_shoulder, r_shoulder = person[5],  person[6]
-                        l_hip,      r_hip      = person[11], person[12]
                         l_wrist,    r_wrist    = person[9],  person[10]
 
                         if confs is not None:
                             c_nose   = confs[idx][0]
-                            c_lhip   = confs[idx][11]
-                            c_rhip   = confs[idx][12]
                             c_lwrist = confs[idx][9]
                             c_rwrist = confs[idx][10]
                         else:
-                            c_nose = c_lhip = c_rhip = 1.0
+                            c_nose = 1.0
                             c_lwrist = c_rwrist = 1.0
 
                         nose_confident = c_nose  >= MIN_KEYPOINT_CONF
-                        hips_confident = (c_lhip >= MIN_KEYPOINT_CONF and
-                                          c_rhip >= MIN_KEYPOINT_CONF)
 
                         shoulder_center = (int((l_shoulder[0] + r_shoulder[0]) / 2),
                                            int((l_shoulder[1] + r_shoulder[1]) / 2))
                         shoulder_width  = max(20.0, abs(r_shoulder[0] - l_shoulder[0]))
-
-                        spine_tilt = 0.0
-                        if hips_confident and l_hip[0] > 0 and r_hip[0] > 0:
-                            hip_center = ((l_hip[0] + r_hip[0]) / 2,
-                                          (l_hip[1] + r_hip[1]) / 2)
-                            spine_tilt = calculate_angle(hip_center, shoulder_center)
 
                         l_wrist_pt = ((int(l_wrist[0]), int(l_wrist[1]))
                                       if (c_lwrist >= REACH_WRIST_CONF and l_wrist[0] > 0) else None)
@@ -798,7 +784,6 @@ def _detection_loop(camera_id):
                             "track_id":        track_id,
                             "shoulder_center": shoulder_center,
                             "shoulder_width":  shoulder_width,
-                            "spine_tilt":      spine_tilt,
                             "nose":            nose,
                             "l_wrist":         l_wrist_pt,
                             "r_wrist":         r_wrist_pt,
@@ -995,6 +980,8 @@ def _detection_loop(camera_id):
             for tid in expired:
                 for key in PER_TRACK_KEYS:
                     entry[key].pop(tid, None)
+                for key in ("last_turn", "_gaze_logged"):
+                    entry.get(key, {}).pop(tid, None)
 
             _merge_wrist_phones(entry, camera_id, clean_frame, students,
                                 current_time, object_detections)
@@ -1153,7 +1140,7 @@ def _detection_loop(camera_id):
             # ==========================================
             # 6. SESSION RECORDING + INCIDENT LOGGING
             # ==========================================
-            entry["recorder"].write(frame)
+            entry["recorder"].write(clean_frame if RECORD_RAW else frame)
 
             is_violating = object_violation or reach_violation or gaze_trigger
 
@@ -1528,6 +1515,19 @@ def stop_monitoring():
     return jsonify({"status": "stopped"})
 
 
+@app.route('/recalibrate', methods=['POST'])
+def recalibrate_route():
+    """Restart every student's neutral-pose calibration without cutting the
+    recording (use when students change seats)."""
+    for entry in list(camera_registry.values()):
+        entry["calibration_start"].clear()
+        entry["gaze_timers"].clear()
+        entry["turn_history"].clear()
+        entry["gaze_lost"].clear()
+    print(f"[session] {session.get('username', 'unknown')} requested recalibration")
+    return jsonify({"status": "recalibrating"})
+
+
 RESET_CONFIRM_PHRASE = "DELETE ALL DATA"  # required phrase for /reset_session
 
 
@@ -1741,6 +1741,7 @@ def system_stats():
         "reach":            reach_count,
         "gaze":             gaze_count,
         "rules":            dict(DETECTION_ENABLED),
+        "build":            BUILD_ID,
         "session_id":       CURRENT_SESSION,
     })
 
@@ -1757,6 +1758,7 @@ LIVE_ENDPOINTS = {
     "get_violations", "start_monitoring", "stop_monitoring", "reset_session",
     "list_cameras", "scan_cameras_route", "add_camera_route",
     "activate_camera_route", "pause_camera_route", "remove_camera_route",
+    "recalibrate_route",
 }
 SESSION_QUERY_ENDPOINTS = {"review", "incidents_route", "session_files_route"}
 
@@ -1864,6 +1866,26 @@ def _guard_session_access():
 
 
 _assign_unowned_sessions(first_user_id())  # pre-existing sessions inherit to first account
+
+
+import atexit
+
+
+def _shutdown():
+    """Finalize open recordings on Ctrl+C / normal exit."""
+    for entry in list(camera_registry.values()):
+        entry["stop_event"].set()
+    for entry in list(camera_registry.values()):
+        t = entry.get("thread")
+        if t and t.is_alive():
+            t.join(timeout=3.0)
+        try:
+            _finish_recording(entry)
+        except Exception as e:
+            print(f"[shutdown] could not finalize recording: {e}")
+
+
+atexit.register(_shutdown)
 
 
 if __name__ == '__main__':

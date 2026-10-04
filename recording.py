@@ -16,7 +16,7 @@ RECORD_FPS = 10.0             # fixed output fps (real time is preserved by dupl
 RECORD_MAX_WIDTH = 960        # wider frames are downscaled to keep files small
 MAX_CATCHUP_FRAMES = 30       # cap on duplicated frames after a stall
 
-# Fix 7: a crash, power loss, or forced quit mid-exam otherwise leaves one
+# a crash, power loss, or forced quit mid-exam otherwise leaves one
 # giant recording file open (and unplayable) for the whole session. Rotating
 # to a fresh file every RECORD_CHUNK_SEC caps the damage to at most one
 # chunk, and means incidents automatically split cleanly across chunk
@@ -68,10 +68,10 @@ class SessionRecorder:
         scale = min(1.0, RECORD_MAX_WIDTH / w)
         size = (int(w * scale) // 2 * 2, int(h * scale) // 2 * 2)   # H.264 needs even dimensions
         os.makedirs(self.dir, exist_ok=True)
-        base = "rec_" + time.strftime("%Y%m%d_%H%M%S")
+        # Milliseconds in the name: PAUSE -> ARM inside one second no longer
+        # reuses the .tmp.mp4 that the previous file is still being finalized from.
+        base = "rec_" + time.strftime("%Y%m%d_%H%M%S") + f"_{int(now * 1000) % 1000:03d}"
         tmp = os.path.join(self.dir, base + ".tmp.mp4")
-        # With ffmpeg installed we re-encode to H.264 afterwards anyway, so skip
-        # the avc1 attempt (it prints OpenH264 errors on Windows without the DLL).
         for codec in (("mp4v",) if shutil.which("ffmpeg") else ("avc1", "mp4v")):
             wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*codec), RECORD_FPS, size)
             if wr.isOpened():
@@ -127,6 +127,13 @@ class SessionRecorder:
         threading.Thread(target=_finalize, args=args, daemon=True).start()
 
 
+def _low_priority_kwargs():
+    """Run ffmpeg at below-normal priority so the re-encode doesn't starve YOLO."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.BELOW_NORMAL_PRIORITY_CLASS}
+    return {"preexec_fn": lambda: os.nice(10)}
+
+
 def _finalize(tmp, final, codec):
     """Makes the file browser-playable. OpenCV's 'mp4v' output usually won't
     play in a browser, so re-encode to H.264 if ffmpeg is installed."""
@@ -135,8 +142,10 @@ def _finalize(tmp, final, codec):
         if codec != "avc1" and ffmpeg:
             r = subprocess.run(
                 [ffmpeg, "-y", "-loglevel", "error", "-i", tmp,
-                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", final])
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+                 "-threads", "2",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", final],
+                **_low_priority_kwargs())
             if r.returncode == 0:
                 os.remove(tmp)
                 return
@@ -146,7 +155,7 @@ def _finalize(tmp, final, codec):
 
 
 def cleanup_orphaned_recordings():
-    """Fix 7: on startup, finalize any *.tmp.mp4 left behind by a crash,
+    """on startup, finalize any *.tmp.mp4 left behind by a crash,
     forced quit, or power loss during a previous run -- otherwise that
     chunk stays permanently unplayable and its incidents point nowhere.
     Call once, before the app starts serving requests."""
@@ -187,7 +196,7 @@ def init_incident_db():
             violation_type TEXT, start_offset REAL, end_offset REAL,
             confidence REAL, recording TEXT, thumb TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    # Fix 6: lets a reviewer mark a flag as a false positive without deleting
+    # lets a reviewer mark a flag as a false positive without deleting
     # the underlying evidence. Added via ALTER so existing incidents.db files
     # (from before this column existed) upgrade in place instead of breaking.
     try:
