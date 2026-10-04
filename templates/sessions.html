@@ -89,7 +89,6 @@
 <script>
 const currentSession = {{ current_session|tojson }};
 const monitoringActive = {{ monitoring_active|tojson }};
-const mfaEnabled = {{ mfa_enabled|tojson }};
 const list = document.getElementById('session-list');
 const notice = document.getElementById('action-notice');
 let sessions = [];
@@ -153,28 +152,17 @@ function renderSessions() {
 }
 
 async function deleteSession(sessionId, button) {
-  if (!mfaEnabled) {
-    if (confirm('Enable authenticator MFA before deleting sessions?')) location.href = '/security/mfa';
-    return;
-  }
-  if (!confirm(`Permanently delete all recordings and flags for "${sessionId}"?`)) return;
   button.disabled = true;
   notice.textContent = 'Confirming deletion...';
   try {
-    const code = prompt('Enter the current six-digit code from your authenticator app:');
-    if (!code || !/^\d{6}$/.test(code.trim())) { button.disabled = false; notice.textContent = 'Deletion cancelled.'; return; }
-    const confirmation = prompt(`Type the session name exactly to confirm deletion:\n${sessionId}`);
+    const confirmation = prompt(`Permanently delete all recordings and flags for "${sessionId}"?\n\nType the session name exactly to confirm:`);
     if (confirmation !== sessionId) { button.disabled = false; notice.textContent = 'Session name did not match; deletion cancelled.'; return; }
     const response = await fetch(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: code.trim(), confirm: confirmation })
+      body: JSON.stringify({ confirm: confirmation })
     });
     const result = await response.json();
     if (!response.ok) {
-      if (result.setup_mfa && confirm(`${result.message}\n\nOpen MFA setup now?`)) {
-        location.href = '/security/mfa';
-        return;
-      }
       throw new Error(result.message || 'Could not delete session.');
     }
     notice.textContent = `Deleted ${sessionId}.`;

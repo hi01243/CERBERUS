@@ -240,25 +240,6 @@ async function stopMonitoring() {
 const RESET_CONFIRM_PHRASE = "DELETE ALL DATA";
 
 async function resetSession() {
-    // Backends without MFA routes (no /security/mfa/status) skip the MFA step.
-    let mfaRequired = false;
-    try {
-        const statusRes = await fetch('/security/mfa/status');
-        const type = statusRes.headers.get('content-type') || '';
-        if (statusRes.ok && type.includes('json')) {
-            const status = await statusRes.json();
-            mfaRequired = true;
-            if (!status.enabled) {
-                if (confirm("Enable authenticator MFA before deleting session records?")) {
-                    location.href = '/security/mfa';
-                }
-                return;
-            }
-        }
-    } catch (err) {
-        mfaRequired = false;   // the server still enforces its own rules
-    }
-
     const typed = prompt(
         `This permanently deletes ALL recordings, incidents, and evidence for ` +
         `this session, across every camera. This cannot be undone.\n\n` +
@@ -269,27 +250,15 @@ async function resetSession() {
         return;
     }
 
-    let totpCode = "";
-    if (mfaRequired) {
-        totpCode = prompt("Enter the current six-digit code from your authenticator app:");
-        if (totpCode === null || !/^\d{6}$/.test(totpCode.trim())) {
-            if (totpCode !== null) alert("A valid authenticator code is required — reset cancelled.");
-            return;
-        }
-    }
     try {
         const res = await fetch('/reset_session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(mfaRequired ? { confirm: typed, totp_code: totpCode.trim() } : { confirm: typed })
+            body: JSON.stringify({ confirm: typed })
         });
         const data = await res.json().catch(() => ({}));
 
         if (!res.ok) {
-            if (data.setup_mfa && confirm(`${data.message}\n\nOpen MFA setup now?`)) {
-                location.href = '/security/mfa';
-                return;
-            }
             alert(data.message || "Reset failed. Make sure monitoring is paused first.");
             return;
         }

@@ -105,8 +105,8 @@ These figures follow from how the detection geometry works. They are starting po
 
 Deletion is deliberately hard to do by accident:
 
-- **Delete a session** (Sessions page): monitoring must be paused for the active session, you must have MFA enabled, and you must enter an authenticator code and type the exact session name.
-- **Reset session** (Monitor page): monitoring must be paused, and you must type `DELETE ALL DATA` and enter an authenticator code. A fresh session, owned by you, is created afterwards.
+- **Delete a session** (Sessions page): monitoring must be paused for the active session, and you must type the exact session name.
+- **Reset session** (Monitor page): monitoring must be paused, and you must type `DELETE ALL DATA`. A fresh session, owned by you, is created afterwards.
 
 Both remove the session's database rows, recordings, and evidence images, and cannot be undone.
 
