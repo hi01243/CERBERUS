@@ -1496,6 +1496,9 @@ def _session_summaries():
                 summary['updated_at'] or '',
                 datetime.fromtimestamp(summary['recordings'][0]['modified']).isoformat(timespec='seconds'),
             )
+    current = summaries.get(CURRENT_SESSION)
+    if current and not current['recording_count'] and not current['flag_count']:
+        summaries.pop(CURRENT_SESSION)
     return sorted(summaries.values(), key=lambda item: item['updated_at'] or '', reverse=True)
 
 
@@ -1684,12 +1687,6 @@ def delete_session_route(session_id):
     data = request.get_json(silent=True) or {}
     if data.get("confirm") != session_id:
         return jsonify({"message": "Type the exact session name to confirm deletion."}), 400
-    secret = get_totp_secret(session.get('user_id'))
-    if not secret:
-        return jsonify({"message": "Enable authenticator MFA before deleting sessions.",
-                        "setup_mfa": True}), 403
-    if not verify_totp(secret, data.get("code")):
-        return jsonify({"message": "Authenticator code is invalid or expired."}), 403
 
     print(f"[session] {session.get('username', 'unknown')} deleted session '{session_id}'")
     replacement = _delete_session_data(session_id)
@@ -1699,7 +1696,7 @@ def delete_session_route(session_id):
 
 @app.route('/reset_session', methods=['POST'])
 def reset_session():
-    """Deletes the current session after TOTP and phrase confirmation."""
+    """Deletes the current session after phrase confirmation."""
     global monitoring_active
 
     if monitoring_active:
@@ -1714,18 +1711,6 @@ def reset_session():
             "status":  "error",
             "message": f'Type "{RESET_CONFIRM_PHRASE}" to confirm this cannot be undone.',
         }), 400
-    secret = get_totp_secret(session.get('user_id'))
-    if not secret:
-        return jsonify({
-            "status": "error",
-            "message": "Enable authenticator MFA before deleting session records.",
-            "setup_mfa": True,
-        }), 403
-    if not verify_totp(secret, data.get('totp_code')):
-        return jsonify({
-            "status": "error",
-            "message": "Authenticator code is invalid or expired.",
-        }), 403
 
     deleted_session = CURRENT_SESSION
     print(f"[session] {session.get('username', 'unknown')} reset session '{deleted_session}'")
