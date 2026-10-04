@@ -138,7 +138,7 @@ GAZE_GRACE_SEC = 0.8
 GAZE_REBASELINE_SEC = 8.0
 TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
 DEBUG_OVERLAY = True        # draw yaw/pitch numbers on frame for threshold tuning
-RECORD_RAW = True   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
+RECORD_RAW = False   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
 
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
