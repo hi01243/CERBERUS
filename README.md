@@ -137,10 +137,6 @@ Only students who are side by side, in the same row, and at a similar depth are 
 
 ---
 
-## Project structure
-
-```
-
 ## Known limitations
 
 - Subtle phone use is still easy to miss, and a phone under a desk or in a lap may not be seen.
