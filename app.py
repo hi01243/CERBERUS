@@ -21,7 +21,7 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp)
 
-BUILD_ID = "2026-10-04-r19-patch"
+BUILD_ID = "2026-10-04-r26-pen-size"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -37,10 +37,11 @@ os.makedirs(VIOLATION_FOLDER, exist_ok=True)
 CURRENT_SESSION = "SESSION_ROOM_A1"
 
 monitoring_active = False  # session-wide arm/disarm toggle
-HEAD_TURN_RATIO_THRESHOLD = 0.45  # horizontal nose-displacement ratio, not a raw angle
+HEAD_TURN_RATIO_THRESHOLD = 0.55  # horizontal nose-displacement ratio, not a raw angle
 GAZE_DURATION_THRESHOLD = 2.5
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
+SHOULDER_MIN_CONF = 0.3   # shoulders only: lets partly hidden back-row students be tracked
 SMOOTHING_WINDOW = 5
 
 # Detection rules — toggled live via POST /settings.
@@ -63,6 +64,13 @@ WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
 WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
 
+# --- PEN FILTER (phones) ---
+PHONE_MAX_ASPECT   = 3.0    # box longer than 3x its width is a pen, not a phone
+PHONE_MIN_SHORT_SW = 0.08   # box short side must be >= this x shoulder width
+PHONE_TINY_SW        = 0.18   # long side below this x shoulder width: always rejected
+PHONE_SMALL_SW       = 0.32   # long side below this: needs high confidence
+PHONE_SMALL_MIN_CONF = 0.60
+
 # --- NEIGHBOR-AWARE SIDE GAZE ---
 GAZE_REQUIRE_NEIGHBOR = False
 GAZE_NEIGHBOR_MIN_DX  = 0.6   # neighbor must be at least this far to the side
@@ -71,8 +79,8 @@ GAZE_NEIGHBOR_ROW_MULT = 2.0  # max vertical offset between shoulder centers
 
 # --- POSE MODEL INFERENCE SETTINGS ---
 POSE_IOU  = 0.5
-POSE_CONF = 0.4
-POSE_IMGSZ = 640   # try 960 if back-row students are small and FPS allows
+POSE_CONF = 0.25
+POSE_IMGSZ = 960   # try 960 if back-row students are small and FPS allows
 
 # --- DUPLICATE-SKELETON (GHOST TRACK) FILTER ---
 DUPLICATE_DIST_MULTIPLIER = 0.8
@@ -107,6 +115,7 @@ TRACK_MIN_AGE_SEC = 1.0
 # Two triggers (either counts): A) wrist enters a circle around the neighbour's
 # shoulder; B) arm stretched out toward a side-by-side neighbour (same-row only).
 REACH_ZONE_RADIUS_MULTIPLIER    = 1.5
+REACH_ZONE_MIN_EXTENSION = 1.0   # wrist must be this many shoulder-widths from its own shoulders
 REACH_EXTENSION_MULTIPLIER      = 1.6
 REACH_PROGRESS_MIN              = 0.35
 REACH_SAME_ROW_MULTIPLIER       = 1.0    # max vertical offset between shoulder centers, x avg shoulder width
@@ -129,7 +138,7 @@ GAZE_GRACE_SEC = 0.8
 GAZE_REBASELINE_SEC = 8.0
 TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
 DEBUG_OVERLAY = True        # draw yaw/pitch numbers on frame for threshold tuning
-RECORD_RAW = False   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
+RECORD_RAW = True   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
 
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
@@ -193,6 +202,8 @@ def add_camera(source, cam_type, label=None):
         "baseline_height": {},
         "pitch_history":   {},
         "gaze_lost":       {},
+        "home_ratio":      {},
+        "home_height":     {},
     }
     with registry_lock:
         camera_registry[cam_id] = entry
@@ -235,7 +246,8 @@ def activate_camera(cam_id):
 
 PER_TRACK_KEYS = ("gaze_timers", "turn_history", "baseline_ratio", "calibration_start",
                   "stable_since", "stable_anchor", "track_first_seen", "track_last_seen",
-                  "calib_samples", "baseline_height", "pitch_history", "gaze_lost")
+                  "calib_samples", "baseline_height", "pitch_history", "gaze_lost",
+                  "home_ratio", "home_height")
 
 
 def _clear_tracking_state(entry):
@@ -372,6 +384,8 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
             ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
             if math.hypot(ccx - wpt[0], ccy - wpt[1]) > WRIST_CROP_MAX_WRIST_DIST * sw:
                 continue   # too far from the hand to be held in it (furniture at the crop edge)
+            if _pen_like((bx1, by1, bx2, by2), sw, conf):
+                continue   # long thin box: a pen, not a phone
             if tid not in best or conf > best[tid]["confidence"]:
                 best[tid] = {
                     "name":       "CELL PHONE",
@@ -436,6 +450,53 @@ def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_det
                 object_detections.append(dict(det, track_id=tid))
     except Exception as e:
         print(f"[{camera_id}] Wrist-crop phone error: {e}")
+
+
+def _owner_of_detection(det, students, established_ids):
+    """track_id of the student a detection belongs to (or None)."""
+    if det.get("track_id") is not None:
+        return det["track_id"]
+    best, best_d = None, float("inf")
+    for s in students:
+        if s["track_id"] not in established_ids:
+            continue
+        d = math.hypot(s["shoulder_center"][0] - det["center"][0],
+                       s["shoulder_center"][1] - det["center"][1])
+        if d < s["shoulder_width"] * ATTRIBUTION_RADIUS_MULTIPLIER and d < best_d:
+            best, best_d = s["track_id"], d
+    return best
+
+
+def _local_sw(det, students, fallback):
+    """Shoulder width of the student whose wrist is nearest the detection."""
+    cx, cy = det["center"]
+    best, best_d = fallback, float("inf")
+    for s in students:
+        for wr in (s["l_wrist"], s["r_wrist"]):
+            if wr is None:
+                continue
+            d = math.hypot(cx - wr[0], cy - wr[1])
+            if d < s["shoulder_width"] * HELD_PHONE_WRIST_MULT and d < best_d:
+                best, best_d = s["shoulder_width"], d
+    return best
+
+
+def _pen_like(bbox, ref_sw, conf=None):
+    """True for long, thin boxes (pens) or boxes far thinner than a phone."""
+    x1, y1, x2, y2 = bbox
+    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+    long_side, short_side = max(bw, bh), min(bw, bh)
+    if long_side / short_side > PHONE_MAX_ASPECT:
+        return True
+    if ref_sw is not None:
+        if short_side < PHONE_MIN_SHORT_SW * ref_sw:
+            return True
+        if long_side < PHONE_TINY_SW * ref_sw:
+            return True
+        if (conf is not None and long_side < PHONE_SMALL_SW * ref_sw
+                and conf < PHONE_SMALL_MIN_CONF):
+            return True
+    return False
 
 
 def _phone_in_hand(det, students):
@@ -508,8 +569,13 @@ def _find_reaching_wrist(reacher, target, same_row):
         if wrist is None:
             continue
 
-        # A: wrist inside the neighbor's personal zone.
-        if math.hypot(wrist[0] - tx, wrist[1] - ty) < target["shoulder_width"] * REACH_ZONE_RADIUS_MULTIPLIER:
+        # A: wrist inside the neighbor's personal zone -- but only if the hand is
+        # actually away from its owner (not just resting on its own desk).
+        d_target = math.hypot(wrist[0] - tx, wrist[1] - ty)
+        d_self   = math.hypot(wrist[0] - rx, wrist[1] - ry)
+        if (d_target < target["shoulder_width"] * REACH_ZONE_RADIUS_MULTIPLIER
+                and d_target < d_self
+                and d_self >= sw * REACH_ZONE_MIN_EXTENSION):
             return wrist
 
         # B: arm stretched out toward the neighbor (same row only).
@@ -667,6 +733,7 @@ def _detection_loop(camera_id):
             violation_reason      = ""
             violation_confidence  = 0.0
             violating_track_id    = None
+            violations            = []   # every (reason, conf, track_id) this frame
 
             # ==========================================
             # 1. PROHIBITED OBJECT DETECTION (YOLO)
@@ -730,8 +797,15 @@ def _detection_loop(camera_id):
                             continue
 
                         if confs is not None:
-                            if (confs[idx][5] < MIN_KEYPOINT_CONF or
-                                    confs[idx][6] < MIN_KEYPOINT_CONF):
+                            if (confs[idx][5] < SHOULDER_MIN_CONF or
+                                    confs[idx][6] < SHOULDER_MIN_CONF):
+                                if DEBUG_OVERLAY and r.boxes is not None and idx < len(r.boxes):
+                                    bx1, by1, bx2, by2 = map(int, r.boxes.xyxy[idx].tolist())
+                                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (90, 90, 90), 1)
+                                    cv2.putText(frame,
+                                                f"sh {confs[idx][5]:.2f}/{confs[idx][6]:.2f}",
+                                                (bx1, max(by1 - 4, 12)),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160, 160, 160), 1)
                                 continue
                             pair_conf = float(confs[idx][5] + confs[idx][6]) / 2.0
                         else:
@@ -838,8 +912,25 @@ def _detection_loop(camera_id):
                                 baseline_ratio[track_id]  = float(np.median([x[0] for x in samples]))
                                 baseline_height[track_id] = float(np.median([x[1] for x in samples]))
                                 stable_anchor[track_id]   = baseline_ratio[track_id]
+                                entry["home_ratio"][track_id]  = baseline_ratio[track_id]
+                                entry["home_height"][track_id] = baseline_height[track_id]
                                 person_turn = "CALIBRATING"
                             else:
+                                # Snap-back: a re-baselined (held) pose must not make the
+                                # return to true neutral look like a turn the other way.
+                                home_r = entry["home_ratio"].get(track_id, baseline_ratio[track_id])
+                                if (abs(baseline_ratio[track_id] - home_r) > REPOSITION_SETTLE_BAND
+                                        and abs(raw_ratio - home_r)
+                                            < abs(raw_ratio - baseline_ratio[track_id])):
+                                    baseline_ratio[track_id]  = home_r
+                                    baseline_height[track_id] = entry["home_height"].get(
+                                        track_id, baseline_height[track_id])
+                                    turn_history.pop(track_id, None)
+                                    pitch_history.pop(track_id, None)
+                                    stable_since[track_id]  = current_time
+                                    stable_anchor[track_id] = raw_ratio
+                                    print(f"[{camera_id}] ID {track_id}: back near home pose, "
+                                          f"baseline restored.")
                                 adjusted_ratio = raw_ratio - baseline_ratio[track_id]
 
                                 if track_id not in turn_history:
@@ -930,6 +1021,7 @@ def _detection_loop(camera_id):
                                     entry.setdefault("_gaze_logged", {})[track_id] = True
                                     print(f"[{camera_id}] ID {track_id}: GAZE ALERT ({person_turn}, {elapsed:.1f}s)")
                                 gaze_trigger = True
+                                violations.append(("PROLONGED_SIDE_GAZE", 0.95, track_id))
                                 if not violation_reason:
                                     violation_reason     = "PROLONGED_SIDE_GAZE"
                                     violation_confidence = 0.95
@@ -1016,9 +1108,19 @@ def _detection_loop(camera_id):
                                                static_sec=STATIC_PHONE_SEC)
             static_phone_idx = {phone_dets[k][0] for k in phone_sup}
 
+            ref_sw = (float(np.median([s["shoulder_width"] for s in students]))
+                      if students else None)
             accepted_detections = []
             for i, det in enumerate(object_detections):
                 x1, y1, x2, y2 = det["bbox"]
+                # wrist-crop detections (they carry a track_id) were already vetted
+                if det.get("track_id") is None and _pen_like(
+                        det["bbox"], _local_sw(det, students, ref_sw), det["confidence"]):
+                    if DEBUG_OVERLAY:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
+                        cv2.putText(frame, "PEN-LIKE (ignored)", (x1, max(y1 - 8, 12)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+                    continue
                 if i in static_phone_idx and not _phone_in_hand(det, students):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
                     cv2.putText(frame, "STATIC OBJECT (suppressed)", (x1, max(y1 - 8, 12)),
@@ -1055,6 +1157,10 @@ def _detection_loop(camera_id):
                 violating_track_id = nearest_student["track_id"] if nearest_student else None
                 if best_det.get("track_id") is not None:
                     violating_track_id = best_det["track_id"]
+                for det in object_detections:
+                    violations.append((f"OBJECT_{det['name'].replace(' ', '_')}",
+                                       det["confidence"],
+                                       _owner_of_detection(det, students, established_ids)))
 
             # ==========================================
             # 4. INTERACTION & DESK LEANING / REACH DETECTION
@@ -1099,6 +1205,8 @@ def _detection_loop(camera_id):
 
                             if r_elapsed >= REACH_DURATION_THRESHOLD and DETECTION_ENABLED["reach"]:
                                 reach_violation = True
+                                violations.append(("REACHING_NEIGHBOR_ZONE", 0.85,
+                                                   min(reacher["track_id"], target["track_id"])))
                                 if not violation_reason:
                                     violation_reason     = "REACHING_NEIGHBOR_ZONE"
                                     violation_confidence = 0.85
@@ -1144,18 +1252,24 @@ def _detection_loop(camera_id):
 
             is_violating = object_violation or reach_violation or gaze_trigger
 
-            if is_violating:
-                inc, is_new = entry["incidents"].observe(
-                    entry["recorder"], frame, violation_reason, violating_track_id,
-                    violation_confidence, CURRENT_SESSION, camera_id,
-                    thumb_dir=os.path.join(VIOLATION_FOLDER, CURRENT_SESSION, camera_id),
-                    thumb_web_prefix=f"violations/{CURRENT_SESSION}/{camera_id}")
-                if is_new:
-                    log_violation(CURRENT_SESSION, violation_reason, violation_confidence,
-                                  inc["thumb_web"], student_track_id=violating_track_id,
-                                  camera_id=camera_id)
-                    print(f"[{camera_id}] NEW INCIDENT {violation_reason} "
-                          f"(track_id={violating_track_id}, t={inc['start']:.1f}s)")
+            if is_violating and violations:
+                unique = {}
+                for v_reason, v_conf, v_tid in violations:
+                    k = (v_tid, v_reason)
+                    if k not in unique or v_conf > unique[k]:
+                        unique[k] = v_conf
+                for (v_tid, v_reason), v_conf in unique.items():
+                    inc, is_new = entry["incidents"].observe(
+                        entry["recorder"], frame, v_reason, v_tid,
+                        v_conf, CURRENT_SESSION, camera_id,
+                        thumb_dir=os.path.join(VIOLATION_FOLDER, CURRENT_SESSION, camera_id),
+                        thumb_web_prefix=f"violations/{CURRENT_SESSION}/{camera_id}")
+                    if is_new:
+                        log_violation(CURRENT_SESSION, v_reason, v_conf,
+                                      inc["thumb_web"], student_track_id=v_tid,
+                                      camera_id=camera_id)
+                        print(f"[{camera_id}] NEW INCIDENT {v_reason} "
+                              f"(track_id={v_tid}, t={inc['start']:.1f}s)")
 
             ret, buf = cv2.imencode('.jpg', frame)
             if ret:
