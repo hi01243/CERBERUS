@@ -107,8 +107,9 @@ Deletion is deliberately hard to do by accident:
 
 - **Delete a session** (Sessions page): monitoring must be paused for the active session, and you must type the exact session name.
 - **Reset session** (Monitor page): monitoring must be paused, and you must type `DELETE ALL DATA`. A fresh session, owned by you, is created afterwards.
+- **Delete an account** (Sessions page): stop monitoring if the live session belongs to you, enter your password, type your exact username and `DELETE ACCOUNT`, and provide an authenticator code if MFA is enabled. This permanently removes all sessions and evidence owned by that account.
 
-Both remove the session's database rows, recordings, and evidence images, and cannot be undone.
+Deleting or resetting a session removes its database rows, recordings, and evidence images. Deleting an account removes all of its owned sessions and evidence. These actions cannot be undone.
 
 > **Keep your MFA setup key somewhere safe.** Once MFA is on, sign-in needs an authenticator code, and there are no backup codes. If you lose the device, you are locked out of that account.
 
