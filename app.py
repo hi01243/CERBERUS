@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-04-r27-wrist-debug-vclock"
+BUILD_ID = "2026-10-04-r27-wrist-debug-vclock-nbr"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -73,9 +73,9 @@ PHONE_SMALL_SW       = 0.32   # long side below this: needs high confidence
 PHONE_SMALL_MIN_CONF = 0.60
 
 # --- NEIGHBOR-AWARE SIDE GAZE ---
-GAZE_REQUIRE_NEIGHBOR = False
+GAZE_REQUIRE_NEIGHBOR = True
 GAZE_NEIGHBOR_MIN_DX  = 0.6   # neighbor must be at least this far to the side
-GAZE_NEIGHBOR_MAX_DX  = 6.0   # ...and no farther than this
+GAZE_NEIGHBOR_MAX_DX  = 4.0   # ...and no farther than this
 GAZE_NEIGHBOR_ROW_MULT = 2.0  # max vertical offset between shoulder centers
 
 # --- POSE MODEL INFERENCE SETTINGS ---
