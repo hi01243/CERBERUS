@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-04-r26-pen-size"
+BUILD_ID = "2026-10-04-r27-wrist-debug-vclock"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -56,8 +56,8 @@ DETECTION_ENABLED = {
 WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
-WRIST_CROP_IMGSZ        = 320    # crops are upscaled to this before inference
-WRIST_CROP_CONF         = 0.50   # lower than the full-frame 0.45; persistence compensates
+WRIST_CROP_IMGSZ        = 416    # crops are upscaled to this before inference
+WRIST_CROP_CONF         = 0.30   # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
 WRIST_CROP_MIN_HITS     = 3      # hits needed ...
@@ -98,7 +98,7 @@ REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 STATIC_OBJECT_RADIUS_PX   = 60
 STATIC_OBJECT_MOVE_PX     = 35
 WRIST_CROP_MAX_WRIST_DIST = 0.6   # phone centre must be within this x shoulder width of the wrist
-WRIST_CROP_STATIC_SEC     = 6.0   # a wrist-crop 'phone' this still ...
+WRIST_CROP_STATIC_SEC     = 25.0   # a wrist-crop 'phone' this still ...
 WRIST_CROP_STATIC_MOVE_PX = 8     # ... (moves less than this) is furniture
 HELD_PHONE_WRIST_MULT     = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
 STATIC_PHONE_SEC          = 10.0  # a full-frame 'phone' that never moves this long is furniture,
@@ -139,7 +139,8 @@ GAZE_GRACE_SEC = 0.8
 GAZE_REBASELINE_SEC = 8.0
 TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
 DEBUG_OVERLAY = True        # draw yaw/pitch numbers on frame for threshold tuning
-RECORD_RAW = True   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
+VIDEO_CLOCK = True   # video files: timers follow video time, not wall-clock time
+RECORD_RAW = False   # True: record the clean frame (no overlays) so a run can be replayed as a 'file' camera; /review then shows no boxes
 
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
@@ -255,7 +256,7 @@ def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
-    for key in ("_wc_hits", "_wc_confirmed", "_wc_last", "last_turn", "_gaze_logged"):
+    for key in ("_wc_hits", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged"):
         entry.pop(key, None)
 
 
@@ -375,12 +376,19 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
         return
 
     results = entry["object_model"](crops, imgsz=WRIST_CROP_IMGSZ,
-                                    conf=WRIST_CROP_CONF, classes=[67], verbose=False)
+                                    conf=0.10, classes=[67], verbose=False)
+    entry["_wc_debug"] = [
+        (ox, oy, ox + c.shape[1], oy + c.shape[0], tid,
+         max([float(b.conf[0]) for b in r.boxes], default=0.0))
+        for (tid, ox, oy, _wpt, _sw), c, r in zip(meta, crops, results)
+    ]
 
     best = {}   # track_id -> strongest phone detection this pass (full-frame coords)
     for (tid, ox, oy, wpt, sw), r in zip(meta, results):
         for box in r.boxes:
             conf = float(box.conf[0])
+            if conf < WRIST_CROP_CONF:
+                continue   # below the real threshold (inference runs at 0.10 for the debug overlay)
             bx1, by1, bx2, by2 = map(int, box.xyxy[0])
             ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
             if math.hypot(ccx - wpt[0], ccy - wpt[1]) > WRIST_CROP_MAX_WRIST_DIST * sw:
@@ -700,6 +708,17 @@ def _detection_loop(camera_id):
             h, w, _ = frame.shape
             clean_frame = frame.copy()
             current_time = time.time()
+            if entry["type"] == "file" and VIDEO_CLOCK:
+                try:
+                    _vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    _vt = cap.get(cv2.CAP_PROP_POS_FRAMES) / _vfps
+                    if _vt + 1.0 < entry.get("_vt_last", 0.0):   # the clip looped
+                        entry["_vt_off"] = (entry.get("_vt_off", 0.0)
+                                            + entry.get("_vt_last", 0.0) + 1.0)
+                    entry["_vt_last"] = _vt
+                    current_time = 1000.0 + entry.get("_vt_off", 0.0) + _vt
+                except Exception:
+                    pass
 
             gaze_timers      = entry["gaze_timers"]
             turn_history     = entry["turn_history"]
@@ -741,7 +760,7 @@ def _detection_loop(camera_id):
             # ==========================================
             object_detections = []
             try:
-                obj_results = entry["object_model"](frame, stream=True, verbose=False, classes=[67])
+                obj_results = entry["object_model"](frame, stream=True, verbose=False, classes=[67], imgsz=960)
                 for r in obj_results:
                     for box in r.boxes:
                         cls_id     = int(box.cls[0])
@@ -1078,6 +1097,11 @@ def _detection_loop(camera_id):
 
             _merge_wrist_phones(entry, camera_id, clean_frame, students,
                                 current_time, object_detections)
+            if DEBUG_OVERLAY:
+                for (dx1, dy1, dx2, dy2, dtid, dtop) in entry.get("_wc_debug", []):
+                    cv2.rectangle(frame, (dx1, dy1), (dx2, dy2), (255, 0, 255), 1)
+                    cv2.putText(frame, f"{dtop:.2f}", (dx1, max(dy1 - 3, 10)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
             established_ids = {tid for tid, seen in track_first_seen.items()
                                if current_time - seen >= TRACK_MIN_AGE_SEC}
