@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r40-badge-strip-hands"
+BUILD_ID = "2026-10-08-r40-badge-strap-gaze"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -44,7 +44,7 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SHOULDER_MIN_CONF = 0.3   # shoulders only: lets partly hidden back-row students be tracked
 SMOOTHING_WINDOW = 5
-BASELINE_MAX_ABS = 0.25   # a 'neutral' pose further off-axis than this was a turned head
+BASELINE_MAX_ABS = 0.45   # a 'neutral' pose further off-axis than this was a turned head
 
 # Detection rules — toggled live via POST /settings.
 DETECTION_ENABLED = {
@@ -93,7 +93,7 @@ PHONE_SMALL_MIN_CONF = 0.60
 BADGE_FILTER_ENABLED = True
 BADGE_ZONE_HALF_W    = 0.60   # strip half-width around the shoulder-centre x
 BADGE_ZONE_TOP       = -0.10   # strip starts this far below the shoulder line
-BADGE_ZONE_BOTTOM    = 2.00   # ...and ends this far below it (above the lap)
+BADGE_ZONE_BOTTOM    = 1.70   # ...and ends this far below it (above the lap)
 BADGE_HAND_HOLD_MULT = 0.30   # wrist this close to the box centre = held phone
 BADGE_TWO_HAND_MULT  = 0.50   # BOTH wrists this close to the box = phone in two hands
 # Appearance test: an ID card is mostly white / low-saturation pixels.
@@ -138,8 +138,8 @@ STATIC_PHONE_SEC          = 30.0  # a full-frame 'phone' that never moves this l
                                   # unless a hand is holding it
 
 # --- CAMERA-BUMP DETECTION ---
-CAMERA_BUMP_RATIO        = 0.6
-CAMERA_BUMP_MIN_STUDENTS = 3
+CAMERA_BUMP_RATIO        = 0.8
+CAMERA_BUMP_MIN_STUDENTS = 6
 CAMERA_BUMP_COOLDOWN_SEC = 5.0
 
 # --- TRACK-AGE GATE ---
@@ -179,8 +179,8 @@ GAZE_DRAIN_RATE = 0.5          # seconds of countdown lost per second spent NOT 
 
 # --- r38: hands-together phone posture (fallback when the detector sees nothing) ---
 HANDS_POSTURE_ENABLED  = True
-HANDS_POSTURE_SEC      = 2.5   # hold this long before flagging
-HANDS_POSTURE_GRACE_SEC = 2.0  # brief dropouts don't reset the hold
+HANDS_POSTURE_SEC      = 3.0   # hold this long before flagging
+HANDS_POSTURE_GRACE_SEC = 1.5  # brief dropouts don't reset the hold
 HANDS_POSTURE_MAX_GAP_SW = 0.75   # wrists no further apart than this x shoulder width
 HANDS_POSTURE_MIN_DROP_SW = 0.15  # both wrists this far below the shoulder line ...
 HANDS_POSTURE_MAX_DROP_SW = 0.75  # ... but no lower (writing on the desk is lower than this)
@@ -688,6 +688,41 @@ def _white_card_frac(frame, bbox):
     return float(white.mean())
 
 
+def _lanyard_above(frame, bbox, s):
+    """True if a thin strap runs from the top of `bbox` up toward the student's
+    neck and is clearly darker than the shirt beside it (a lanyard)."""
+    if frame is None or bbox is None or s is None:
+        return False
+    try:
+        fh, fw = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        sx, sy = s["shoulder_center"]
+        sw = float(s["shoulder_width"])
+        top = np.array([(x1 + x2) / 2.0, float(y1)])
+        neck = np.array([float(sx), float(sy) - 0.1 * sw])
+        seg = neck - top
+        length = float(np.hypot(seg[0], seg[1]))
+        if length < 0.25 * sw:
+            return False
+        perp = np.array([-seg[1], seg[0]]) / length * (0.14 * sw)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        def px(p):
+            x = int(min(max(p[0], 1), fw - 2))
+            y = int(min(max(p[1], 1), fh - 2))
+            return float(gray[y - 1:y + 2, x - 1:x + 2].mean())
+
+        darker = 0
+        for t in np.linspace(0.15, 0.85, 8):
+            p = top + seg * t
+            side = (px(p + perp) + px(p - perp)) / 2.0
+            if side - px(p) >= 18:
+                darker += 1
+        return darker >= 6
+    except Exception:
+        return False
+
+
 def _badge_like(center, students, frame=None, bbox=None):
     """True if `center` is inside some student's chest strip (where an ID badge
     on a lanyard hangs) and none of that student's wrists is right on it."""
@@ -704,9 +739,12 @@ def _badge_like(center, students, frame=None, bbox=None):
             continue
         if card_like:
             return True    # white ID-card look in the chest strip: a badge, even with a hand on it
+        strap = _lanyard_above(frame, bbox, s)
         hand_limit = BADGE_HAND_HOLD_MULT * sw
         for wr in (s["l_wrist"], s["r_wrist"]):
             if wr is not None and math.hypot(cx - wr[0], cy - wr[1]) < hand_limit:
+                if strap:
+                    return True    # lanyard strap leads to it: a badge under a resting hand
                 return False   # hand is on it: treat as a real phone
         near_both = [wr for wr in (s["l_wrist"], s["r_wrist"])
                      if wr is not None
@@ -1389,6 +1427,8 @@ def _detection_loop(camera_id):
                                 # flicker): drain the countdown instead of resetting it.
                                 gaze_timers[track_id] += _dt * (1.0 + GAZE_DRAIN_RATE)
                                 if current_time - gaze_timers[track_id] <= 0.0:
+                                    print(f"[{camera_id}] ID {track_id}: gaze timer dropped "
+                                          f"(turn={person_turn}, yaw={smoothed_ratio:+.2f}, dn={down_delta:+.2f})")
                                     gaze_timers.pop(track_id, None)
                                     entry.get("_gaze_logged", {}).pop(track_id, None)
                             if person_turn == "LOOKING DOWN":
