@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r38-leaky-gaze-posture"
+BUILD_ID = "2026-10-08-r39-badge-gaze-fixes"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -44,7 +44,7 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SHOULDER_MIN_CONF = 0.3   # shoulders only: lets partly hidden back-row students be tracked
 SMOOTHING_WINDOW = 5
-BASELINE_MAX_ABS = 0.45   # a 'neutral' pose further off-axis than this was a turned head
+BASELINE_MAX_ABS = 0.25   # a 'neutral' pose further off-axis than this was a turned head
 
 # Detection rules — toggled live via POST /settings.
 DETECTION_ENABLED = {
@@ -81,7 +81,7 @@ WRIST_WEAK_MIN_DROP_SW   = 0.15   # ... and both between this far below the shou
 WRIST_WEAK_MAX_DROP_SW   = 1.6    #     and this far (above the desk/lap)
 
 # --- PEN FILTER (phones) ---
-PHONE_MAX_ASPECT   = 3.0    # box longer than 3x its width is a pen, not a phone
+PHONE_MAX_ASPECT   = 3.5    # box longer than 3x its width is a pen, not a phone
 PHONE_MIN_SHORT_SW = 0.08   # box short side must be >= this x shoulder width
 PHONE_TINY_SW        = 0.18   # long side below this x shoulder width: always rejected
 PHONE_SMALL_SW       = 0.32   # long side below this: needs high confidence
@@ -92,14 +92,14 @@ PHONE_SMALL_MIN_CONF = 0.60
 # ignored unless a wrist is almost touching it. All values are x shoulder width.
 BADGE_FILTER_ENABLED = True
 BADGE_ZONE_HALF_W    = 0.45   # strip half-width around the shoulder-centre x
-BADGE_ZONE_TOP       = 0.30   # strip starts this far below the shoulder line
-BADGE_ZONE_BOTTOM    = 1.70   # ...and ends this far below it (above the lap)
-BADGE_HAND_HOLD_MULT = 0.6   # wrist this close to the box centre = held phone
-BADGE_TWO_HAND_MULT  = 0.7   # BOTH wrists this close to the box = phone in two hands
+BADGE_ZONE_TOP       = -0.10   # strip starts this far below the shoulder line
+BADGE_ZONE_BOTTOM    = 1.10   # ...and ends this far below it (above the lap)
+BADGE_HAND_HOLD_MULT = 0.30   # wrist this close to the box centre = held phone
+BADGE_TWO_HAND_MULT  = 0.50   # BOTH wrists this close to the box = phone in two hands
 # Appearance test: an ID card is mostly white / low-saturation pixels.
 BADGE_WHITE_V    = 165    # HSV value above this ...
 BADGE_WHITE_S    = 70     # ... and saturation below this = "white" pixel
-BADGE_WHITE_FRAC = 0.35   # box with at least this share of white pixels = ID card
+BADGE_WHITE_FRAC = 0.28   # box with at least this share of white pixels = ID card
                           # (lower it if cards still get through; raise it if
                           #  white-cased phones in the chest area get ignored)
 
@@ -130,11 +130,11 @@ REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 # Suppresses stationary detections that are seat plates or furniture, not phones.
 STATIC_OBJECT_RADIUS_PX   = 60
 STATIC_OBJECT_MOVE_PX     = 35
-WRIST_CROP_MAX_WRIST_DIST = 0.8   # phone centre must be within this x shoulder width of the wrist
+WRIST_CROP_MAX_WRIST_DIST = 1.2   # phone centre must be within this x shoulder width of the wrist
 WRIST_CROP_STATIC_SEC     = 60.0   # a wrist-crop 'phone' this still ...
 WRIST_CROP_STATIC_MOVE_PX = 8     # ... (moves less than this) is furniture
 HELD_PHONE_WRIST_MULT     = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
-STATIC_PHONE_SEC          = 10.0  # a full-frame 'phone' that never moves this long is furniture,
+STATIC_PHONE_SEC          = 30.0  # a full-frame 'phone' that never moves this long is furniture,
                                   # unless a hand is holding it
 
 # --- CAMERA-BUMP DETECTION ---
@@ -195,14 +195,14 @@ BADGE_LOCK_RATIO      = 2.0    # ... and be this many times the shoulder-offset 
 
 # --- r37: looking-down must not cancel a running side-gaze ---
 GAZE_DOWN_GRACE_SEC   = 3.0    # a LOOKING DOWN blip keeps a running gaze timer alive this long
-GAZE_DOWN_HYSTERESIS  = 1.7    # while a gaze timer runs, head-drop needed for 'down' is this x PITCH_DOWN_DELTA
+GAZE_DOWN_HYSTERESIS  = 2.5    # while a gaze timer runs, head-drop needed for 'down' is this x PITCH_DOWN_DELTA
 
 # --- r37: wrist-crop phone pass ---
 WRIST_CROP_FLOOR_CONF = 0.05   # inference floor (the real thresholds are applied afterwards)
 WRIST_CROP_AUGMENT    = True   # test-time augmentation (flip/scales); auto-disables if unsupported
 
 # If flagged this long it's a held posture (leaning to write); re-baseline silently.
-GAZE_REBASELINE_SEC = 8.0
+GAZE_REBASELINE_SEC = 30.0
 TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
 DEBUG_OVERLAY = True        # draw yaw/pitch numbers on frame for threshold tuning
 VIDEO_CLOCK = True   # video files: timers follow video time, not wall-clock time
@@ -322,7 +322,7 @@ def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
-    for key in ("_wc_hits", "_wc_weak_hits", "_badge_hist", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
+    for key in ("_wc_hits", "_wc_weak_hits", "_badge_hist", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg", "_turn_hold"):
         entry.pop(key, None)
 
 
@@ -1320,6 +1320,14 @@ def _detection_loop(camera_id):
                                                     raw_ratio - baseline_ratio[track_id])
                                                 baseline_height[track_id] += BASELINE_ADAPT_RATE * (
                                                     raw_height - baseline_height[track_id])
+
+                        # r39: keep a side turn alive through brief nose dropouts
+                        _hold = entry.setdefault("_turn_hold", {})
+                        if person_turn in ("LOOKING LEFT", "LOOKING RIGHT"):
+                            _hold[track_id] = (person_turn, smoothed_ratio, current_time)
+                        elif (not nose_confident and track_id in _hold
+                              and current_time - _hold[track_id][2] <= 0.8):
+                            person_turn, smoothed_ratio = _hold[track_id][0], _hold[track_id][1]
 
                         if DEBUG_OVERLAY and person_turn != "CALIBRATING":
                             cv2.putText(frame, f"yaw {smoothed_ratio:+.2f} dn {down_delta:+.2f} b {baseline_ratio.get(track_id, 0.0):+.2f}",
