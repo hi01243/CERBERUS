@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r32-mid-handoff"
+BUILD_ID = "2026-10-08-r33-gaze-direction"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -349,7 +349,8 @@ def scan_local_cameras(max_index=4):
 add_camera(0, "local", label="cam1")  # default camera so the dashboard is not empty
 
 
-def _neighbor_in_direction(turn, track_id, candidates, kept_idx, entry=None, now=None):
+def _neighbor_in_direction(turn, track_id, candidates, kept_idx, entry=None, now=None,
+                           image_dir=None):
     """True if another (non-ghost) student sits on the side this student is
     turned toward, in roughly the same row.  `turn` is 'LOOKING LEFT' or
     'LOOKING RIGHT' (image-left / image-right, matching the yaw sign).
@@ -363,7 +364,11 @@ def _neighbor_in_direction(turn, track_id, candidates, kept_idx, entry=None, now
                if c["track_id"] == track_id and c["idx"] in kept_idx), None)
     if me is None:
         return True
-    direction = -1 if turn == "LOOKING LEFT" else 1
+    if image_dir is None:
+        # Fallback only. The labels are the PERSON's left/right, which is the
+        # opposite image side for a student facing the camera.
+        image_dir = 1 if turn == "LOOKING LEFT" else -1
+    direction = image_dir   # +1 = look for a neighbour on the image-right, -1 = image-left
     side = "L" if direction < 0 else "R"
     nearest = {"L": None, "R": None}   # per side: (signed dx, dy) in shoulder widths, for the overlay
     found = False
@@ -1016,9 +1021,11 @@ def _detection_loop(camera_id):
                         adjusted_ratio = 0.0
                         down_delta     = 0.0
 
+                        sh_sign        = -1.0   # image-x direction of the l_shoulder->r_shoulder vector (-1 = front-facing)
                         if (nose_confident and nose[0] > 0
                                 and l_shoulder[0] > 0 and r_shoulder[0] > 0):
                             d_x_sh = r_shoulder[0] - l_shoulder[0]
+                            sh_sign = 1.0 if d_x_sh >= 0 else -1.0
                             d_y_sh = r_shoulder[1] - l_shoulder[1]
                             shoulder_angle_rad = math.atan2(d_y_sh, d_x_sh)
 
@@ -1145,7 +1152,8 @@ def _detection_loop(camera_id):
                         gaze_candidate = (DETECTION_ENABLED["gaze"]
                                           and person_turn not in ("FORWARD", "CALIBRATING", "LOOKING DOWN")
                                           and _neighbor_in_direction(person_turn, track_id, candidates, kept_idx,
-                                                                     entry, current_time))
+                                                                     entry, current_time,
+                                                                     (1 if smoothed_ratio > 0 else -1) * sh_sign))
                         if (DETECTION_ENABLED["gaze"] and not gaze_candidate
                                 and person_turn in ("LOOKING LEFT", "LOOKING RIGHT")):
                             cv2.putText(frame, entry.get("_nb_dbg", {}).get(track_id, "turn ignored: no neighbor"),
