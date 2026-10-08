@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-04-r27-wrist-debug-vclock-nbr"
+BUILD_ID = "2026-10-08-r30-wrist-model-s"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -44,6 +44,7 @@ ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SHOULDER_MIN_CONF = 0.3   # shoulders only: lets partly hidden back-row students be tracked
 SMOOTHING_WINDOW = 5
+BASELINE_MAX_ABS = 0.45   # a 'neutral' pose further off-axis than this was a turned head
 
 # Detection rules — toggled live via POST /settings.
 DETECTION_ENABLED = {
@@ -64,6 +65,9 @@ WRIST_CROP_MIN_HITS     = 3      # hits needed ...
 WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
 WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
+WRIST_CROP_MODEL        = "yolo11s.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
+WRIST_CROP_CLASSES      = [67, 65]      # cell phone + remote (a held phone is often called a remote)
+WRIST_CROP_REMOTE_CONF  = 0.35          # stricter bar for the "remote" class
 
 # --- PEN FILTER (phones) ---
 PHONE_MAX_ASPECT   = 3.0    # box longer than 3x its width is a pen, not a phone
@@ -71,6 +75,16 @@ PHONE_MIN_SHORT_SW = 0.08   # box short side must be >= this x shoulder width
 PHONE_TINY_SW        = 0.18   # long side below this x shoulder width: always rejected
 PHONE_SMALL_SW       = 0.32   # long side below this: needs high confidence
 PHONE_SMALL_MIN_CONF = 0.60
+
+# --- ID-BADGE / LANYARD FILTER (phones) ---
+# A badge hangs on the chest midline. Any 'phone' centred in that strip is
+# ignored unless a wrist is almost touching it. All values are x shoulder width.
+BADGE_FILTER_ENABLED = True
+BADGE_ZONE_HALF_W    = 0.45   # strip half-width around the shoulder-centre x
+BADGE_ZONE_TOP       = 0.30   # strip starts this far below the shoulder line
+BADGE_ZONE_BOTTOM    = 1.70   # ...and ends this far below it (above the lap)
+BADGE_HAND_HOLD_MULT = 0.20   # wrist this close to the box centre = held phone
+BADGE_TWO_HAND_MULT  = 0.50   # BOTH wrists this close to the box = phone in two hands
 
 # --- NEIGHBOR-AWARE SIDE GAZE ---
 GAZE_REQUIRE_NEIGHBOR = True
@@ -350,6 +364,20 @@ def _neighbor_in_direction(turn, track_id, candidates, kept_idx):
     return False
 
 
+def _wrist_model(entry):
+    """Model used for the zoomed-in wrist-crop pass (loaded once per camera)."""
+    m = entry.get("wrist_model")
+    if m is None:
+        try:
+            m = YOLO(WRIST_CROP_MODEL)
+            print(f"[cerberus] wrist-crop model: {WRIST_CROP_MODEL}")
+        except Exception as e:
+            print(f"[cerberus] could not load {WRIST_CROP_MODEL} ({e}); using the nano model")
+            m = entry["object_model"]
+        entry["wrist_model"] = m
+    return m
+
+
 def _wrist_crop_sample(entry, camera_id, frame, students, now):
     """One zoomed-in phone pass over every established student's wrists."""
     h, w = frame.shape[:2]
@@ -375,11 +403,11 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
     if not crops:
         return
 
-    results = entry["object_model"](crops, imgsz=WRIST_CROP_IMGSZ,
-                                    conf=0.10, classes=[67], verbose=False)
+    results = _wrist_model(entry)(crops, imgsz=WRIST_CROP_IMGSZ,
+                                    conf=0.10, classes=WRIST_CROP_CLASSES, verbose=False)
     entry["_wc_debug"] = [
         (ox, oy, ox + c.shape[1], oy + c.shape[0], tid,
-         max([float(b.conf[0]) for b in r.boxes], default=0.0))
+         max([(float(b.conf[0]), int(b.cls[0])) for b in r.boxes], default=(0.0, -1)))
         for (tid, ox, oy, _wpt, _sw), c, r in zip(meta, crops, results)
     ]
 
@@ -387,7 +415,8 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
     for (tid, ox, oy, wpt, sw), r in zip(meta, results):
         for box in r.boxes:
             conf = float(box.conf[0])
-            if conf < WRIST_CROP_CONF:
+            cls_id = int(box.cls[0])
+            if conf < (WRIST_CROP_REMOTE_CONF if cls_id == 65 else WRIST_CROP_CONF):
                 continue   # below the real threshold (inference runs at 0.10 for the debug overlay)
             bx1, by1, bx2, by2 = map(int, box.xyxy[0])
             ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
@@ -395,6 +424,8 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
                 continue   # too far from the hand to be held in it (furniture at the crop edge)
             if _pen_like((bx1, by1, bx2, by2), sw, conf):
                 continue   # long thin box: a pen, not a phone
+            if _badge_like((ccx, ccy), students):
+                continue   # ID badge on a lanyard, not a phone
             if tid not in best or conf > best[tid]["confidence"]:
                 best[tid] = {
                     "name":       "CELL PHONE",
@@ -505,6 +536,32 @@ def _pen_like(bbox, ref_sw, conf=None):
         if (conf is not None and long_side < PHONE_SMALL_SW * ref_sw
                 and conf < PHONE_SMALL_MIN_CONF):
             return True
+    return False
+
+
+def _badge_like(center, students):
+    """True if `center` is inside some student's chest strip (where an ID badge
+    on a lanyard hangs) and none of that student's wrists is right on it."""
+    if not BADGE_FILTER_ENABLED:
+        return False
+    cx, cy = center
+    for s in students:
+        scx, scy = s["shoulder_center"]
+        sw = s["shoulder_width"]
+        if abs(cx - scx) > BADGE_ZONE_HALF_W * sw:
+            continue
+        if not (scy + BADGE_ZONE_TOP * sw <= cy <= scy + BADGE_ZONE_BOTTOM * sw):
+            continue
+        hand_limit = BADGE_HAND_HOLD_MULT * sw
+        for wr in (s["l_wrist"], s["r_wrist"]):
+            if wr is not None and math.hypot(cx - wr[0], cy - wr[1]) < hand_limit:
+                return False   # hand is on it: treat as a real phone
+        near_both = [wr for wr in (s["l_wrist"], s["r_wrist"])
+                     if wr is not None
+                     and math.hypot(cx - wr[0], cy - wr[1]) < BADGE_TWO_HAND_MULT * sw]
+        if len(near_both) == 2:
+            return False   # both hands wrapped round it: a phone, not a badge
+        return True
     return False
 
 
@@ -938,6 +995,12 @@ def _detection_loop(camera_id):
                             else:
                                 # Snap-back: a re-baselined (held) pose must not make the
                                 # return to true neutral look like a turn the other way.
+                                # Clamp: a baseline this far off-axis means calibration (or a held-posture
+                                # re-baseline) caught a head that was already turned, which would invert
+                                # the sign of every later reading.
+                                baseline_ratio[track_id] = max(-BASELINE_MAX_ABS, min(BASELINE_MAX_ABS, baseline_ratio[track_id]))
+                                entry["home_ratio"][track_id] = max(-BASELINE_MAX_ABS, min(BASELINE_MAX_ABS,
+                                    entry["home_ratio"].get(track_id, baseline_ratio[track_id])))
                                 home_r = entry["home_ratio"].get(track_id, baseline_ratio[track_id])
                                 if (abs(baseline_ratio[track_id] - home_r) > REPOSITION_SETTLE_BAND
                                         and abs(raw_ratio - home_r)
@@ -1009,7 +1072,7 @@ def _detection_loop(camera_id):
                                                     raw_height - baseline_height[track_id])
 
                         if DEBUG_OVERLAY and person_turn != "CALIBRATING":
-                            cv2.putText(frame, f"yaw {smoothed_ratio:+.2f} dn {down_delta:+.2f}",
+                            cv2.putText(frame, f"yaw {smoothed_ratio:+.2f} dn {down_delta:+.2f} b {baseline_ratio.get(track_id, 0.0):+.2f}",
                                         (shoulder_center[0] - 45, shoulder_center[1] + 42),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
@@ -1017,7 +1080,7 @@ def _detection_loop(camera_id):
                         last_turn = entry.setdefault("last_turn", {})
                         if last_turn.get(track_id) != person_turn:
                             print(f"[{camera_id}] ID {track_id}: {last_turn.get(track_id, '-')} -> "
-                                  f"{person_turn}  yaw={smoothed_ratio:+.2f} dn={down_delta:+.2f}")
+                                  f"{person_turn}  yaw={smoothed_ratio:+.2f} dn={down_delta:+.2f} base={baseline_ratio.get(track_id, 0.0):+.2f}")
                             last_turn[track_id] = person_turn
                         active_ids.append(track_id)
 
@@ -1100,7 +1163,8 @@ def _detection_loop(camera_id):
             if DEBUG_OVERLAY:
                 for (dx1, dy1, dx2, dy2, dtid, dtop) in entry.get("_wc_debug", []):
                     cv2.rectangle(frame, (dx1, dy1), (dx2, dy2), (255, 0, 255), 1)
-                    cv2.putText(frame, f"{dtop:.2f}", (dx1, max(dy1 - 3, 10)),
+                    cv2.putText(frame, f"{dtop[0]:.2f}" + (" remote" if dtop[1] == 65 else ""),
+                            (dx1, max(dy1 - 3, 10)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
             established_ids = {tid for tid, seen in track_first_seen.items()
@@ -1144,6 +1208,12 @@ def _detection_loop(camera_id):
                     if DEBUG_OVERLAY:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
                         cv2.putText(frame, "PEN-LIKE (ignored)", (x1, max(y1 - 8, 12)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+                    continue
+                if _badge_like(det["center"], students):
+                    if DEBUG_OVERLAY:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
+                        cv2.putText(frame, "ID BADGE (ignored)", (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
                     continue
                 if i in static_phone_idx and not _phone_in_hand(det, students):
