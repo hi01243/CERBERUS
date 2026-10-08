@@ -39,3 +39,4 @@ incidents.db
 # Python / patch leftovers
 *.pyc
 *.bak
+*cerberus.db
