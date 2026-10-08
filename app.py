@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r33-gaze-direction"
+BUILD_ID = "2026-10-08-r34-phone-hands"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -57,8 +57,8 @@ DETECTION_ENABLED = {
 WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
-WRIST_CROP_IMGSZ        = 416    # crops are upscaled to this before inference
-WRIST_CROP_CONF         = 0.30   # lower than the full-frame 0.45; persistence compensates
+WRIST_CROP_IMGSZ        = 640    # crops are upscaled to this before inference
+WRIST_CROP_CONF         = 0.25   # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
 WRIST_CROP_MIN_HITS     = 3      # hits needed ...
@@ -68,6 +68,17 @@ WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this 
 WRIST_CROP_MODEL        = "yolo11s.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
 WRIST_CROP_CLASSES      = [67, 65]      # cell phone + remote (a held phone is often called a remote)
 WRIST_CROP_REMOTE_CONF  = 0.35          # stricter bar for the "remote" class
+
+# --- HANDS-TOGETHER PHONE CROP + WEAK-EVIDENCE PATH (r34) ---
+WRIST_HANDS_CROP         = True   # extra zoomed crop centred between both hands
+WRIST_HANDS_MAX_GAP_SW   = 1.3    # only when the wrists are this close (x shoulder width)
+WRIST_HANDS_MIN_HALF_SW  = 0.60   # hands-crop half-size is at least this x shoulder width
+WRIST_WEAK_CONF          = 0.12   # faint detections count only in the hands-at-chest posture
+WRIST_WEAK_MIN_HITS      = 5
+WRIST_WEAK_WINDOW_SEC    = 3.0
+WRIST_WEAK_MAX_GAP_SW    = 0.9    # wrists no further apart than this ...
+WRIST_WEAK_MIN_DROP_SW   = 0.15   # ... and both between this far below the shoulder line
+WRIST_WEAK_MAX_DROP_SW   = 1.6    #     and this far (above the desk/lap)
 
 # --- PEN FILTER (phones) ---
 PHONE_MAX_ASPECT   = 3.0    # box longer than 3x its width is a pen, not a phone
@@ -83,8 +94,8 @@ BADGE_FILTER_ENABLED = True
 BADGE_ZONE_HALF_W    = 0.45   # strip half-width around the shoulder-centre x
 BADGE_ZONE_TOP       = 0.30   # strip starts this far below the shoulder line
 BADGE_ZONE_BOTTOM    = 1.70   # ...and ends this far below it (above the lap)
-BADGE_HAND_HOLD_MULT = 0.20   # wrist this close to the box centre = held phone
-BADGE_TWO_HAND_MULT  = 0.50   # BOTH wrists this close to the box = phone in two hands
+BADGE_HAND_HOLD_MULT = 0.35   # wrist this close to the box centre = held phone
+BADGE_TWO_HAND_MULT  = 0.7   # BOTH wrists this close to the box = phone in two hands
 
 # --- NEIGHBOR-AWARE SIDE GAZE ---
 GAZE_REQUIRE_NEIGHBOR = True
@@ -277,7 +288,7 @@ def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
-    for key in ("_wc_hits", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
+    for key in ("_wc_hits", "_wc_weak_hits", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
         entry.pop(key, None)
 
 
@@ -436,6 +447,20 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
             meta.append((tid, x1, y1, wrist, s["shoulder_width"]))
             if len(crops) >= WRIST_CROP_MAX_CROPS:
                 break
+        if (WRIST_HANDS_CROP and s["l_wrist"] is not None and s["r_wrist"] is not None
+                and len(crops) < WRIST_CROP_MAX_CROPS):
+            lw, rw = s["l_wrist"], s["r_wrist"]
+            gap = math.hypot(lw[0] - rw[0], lw[1] - rw[1])
+            if gap <= WRIST_HANDS_MAX_GAP_SW * s["shoulder_width"]:
+                mx, my = (lw[0] + rw[0]) // 2, (lw[1] + rw[1]) // 2
+                hh = int(max(WRIST_CROP_MIN_HALF_PX,
+                             WRIST_HANDS_MIN_HALF_SW * s["shoulder_width"],
+                             gap * 0.75))
+                x1, y1 = max(0, mx - hh), max(0, my - hh)
+                x2, y2 = min(w, mx + hh), min(h, my + hh)
+                if x2 - x1 >= 16 and y2 - y1 >= 16:
+                    crops.append(frame[y1:y2, x1:x2].copy())
+                    meta.append((tid, x1, y1, (mx, my), s["shoulder_width"]))
         if len(crops) >= WRIST_CROP_MAX_CROPS:
             break
     if not crops:
@@ -450,12 +475,18 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
     ]
 
     best = {}   # track_id -> strongest phone detection this pass (full-frame coords)
+    _stu = {s["track_id"]: s for s in students}
     for (tid, ox, oy, wpt, sw), r in zip(meta, results):
         for box in r.boxes:
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
-            if conf < (WRIST_CROP_REMOTE_CONF if cls_id == 65 else WRIST_CROP_CONF):
-                continue   # below the real threshold (inference runs at 0.10 for the debug overlay)
+            need = WRIST_CROP_REMOTE_CONF if cls_id == 65 else WRIST_CROP_CONF
+            weak = False
+            if conf < need:
+                if conf >= WRIST_WEAK_CONF and _hands_at_chest(_stu.get(tid)):
+                    weak = True    # faint, but both hands are up at chest height
+                else:
+                    continue   # below the real threshold (inference runs at 0.10 for the debug overlay)
             bx1, by1, bx2, by2 = map(int, box.xyxy[0])
             ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
             if math.hypot(ccx - wpt[0], ccy - wpt[1]) > WRIST_CROP_MAX_WRIST_DIST * sw:
@@ -470,16 +501,21 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
                     "confidence": conf,
                     "center":     (ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2),
                     "bbox":       (ox + bx1, oy + by1, ox + bx2, oy + by2),
+                    "weak":       weak,
                 }
 
     hits      = entry.setdefault("_wc_hits", {})
     confirmed = entry.setdefault("_wc_confirmed", {})
 
     for tid, det in best.items():
-        recent = [t for t in hits.get(tid, []) if now - t <= WRIST_CROP_WINDOW_SEC]
+        weak = det.get("weak")
+        store = entry.setdefault("_wc_weak_hits", {}) if weak else hits
+        window = WRIST_WEAK_WINDOW_SEC if weak else WRIST_CROP_WINDOW_SEC
+        need_hits = WRIST_WEAK_MIN_HITS if weak else WRIST_CROP_MIN_HITS
+        recent = [t for t in store.get(tid, []) if now - t <= window]
         recent.append(now)
-        hits[tid] = recent
-        if len(recent) >= WRIST_CROP_MIN_HITS:
+        store[tid] = recent
+        if len(recent) >= need_hits:
             if tid not in confirmed:
                 print(f"[{camera_id}] ID {tid}: phone in hand (wrist crop, "
                       f"{det['confidence']*100:.0f}%)")
@@ -613,6 +649,22 @@ def _phone_in_hand(det, students):
             if wr is not None and math.hypot(cx - wr[0], cy - wr[1]) < lim:
                 return True
     return False
+
+
+def _hands_at_chest(s):
+    """True if both wrists are close together at chest height (typical of a phone
+    held in two hands) -- used to accept faint detections."""
+    if s is None:
+        return False
+    l, r = s["l_wrist"], s["r_wrist"]
+    if l is None or r is None:
+        return False
+    sw = s["shoulder_width"]
+    sy = s["shoulder_center"][1]
+    if math.hypot(l[0] - r[0], l[1] - r[1]) > WRIST_WEAK_MAX_GAP_SW * sw:
+        return False
+    return all(WRIST_WEAK_MIN_DROP_SW * sw <= w[1] - sy <= WRIST_WEAK_MAX_DROP_SW * sw
+               for w in (l, r))
 
 
 def make_status_frame(label, message, sub_message=""):
@@ -1276,7 +1328,7 @@ def _detection_loop(camera_id):
                         cv2.putText(frame, "PEN-LIKE (ignored)", (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
                     continue
-                if _badge_like(det["center"], students):
+                if det.get("track_id") is None and _badge_like(det["center"], students):
                     if DEBUG_OVERLAY:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
                         cv2.putText(frame, "ID BADGE (ignored)", (x1, max(y1 - 8, 12)),
