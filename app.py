@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r34-phone-hands"
+BUILD_ID = "2026-10-08-r35-badge-appearance"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -94,8 +94,14 @@ BADGE_FILTER_ENABLED = True
 BADGE_ZONE_HALF_W    = 0.45   # strip half-width around the shoulder-centre x
 BADGE_ZONE_TOP       = 0.30   # strip starts this far below the shoulder line
 BADGE_ZONE_BOTTOM    = 1.70   # ...and ends this far below it (above the lap)
-BADGE_HAND_HOLD_MULT = 0.35   # wrist this close to the box centre = held phone
+BADGE_HAND_HOLD_MULT = 0.6   # wrist this close to the box centre = held phone
 BADGE_TWO_HAND_MULT  = 0.7   # BOTH wrists this close to the box = phone in two hands
+# Appearance test: an ID card is mostly white / low-saturation pixels.
+BADGE_WHITE_V    = 165    # HSV value above this ...
+BADGE_WHITE_S    = 70     # ... and saturation below this = "white" pixel
+BADGE_WHITE_FRAC = 0.35   # box with at least this share of white pixels = ID card
+                          # (lower it if cards still get through; raise it if
+                          #  white-cased phones in the chest area get ignored)
 
 # --- NEIGHBOR-AWARE SIDE GAZE ---
 GAZE_REQUIRE_NEIGHBOR = True
@@ -124,7 +130,7 @@ REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 # Suppresses stationary detections that are seat plates or furniture, not phones.
 STATIC_OBJECT_RADIUS_PX   = 60
 STATIC_OBJECT_MOVE_PX     = 35
-WRIST_CROP_MAX_WRIST_DIST = 0.6   # phone centre must be within this x shoulder width of the wrist
+WRIST_CROP_MAX_WRIST_DIST = 0.8   # phone centre must be within this x shoulder width of the wrist
 WRIST_CROP_STATIC_SEC     = 25.0   # a wrist-crop 'phone' this still ...
 WRIST_CROP_STATIC_MOVE_PX = 8     # ... (moves less than this) is furniture
 HELD_PHONE_WRIST_MULT     = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
@@ -430,6 +436,7 @@ def _wrist_model(entry):
 def _wrist_crop_sample(entry, camera_id, frame, students, now):
     """One zoomed-in phone pass over every established student's wrists."""
     h, w = frame.shape[:2]
+    entry["_wc_rej"] = []
     crops, meta = [], []
     for s in students:
         tid = s["track_id"]
@@ -489,11 +496,16 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
                     continue   # below the real threshold (inference runs at 0.10 for the debug overlay)
             bx1, by1, bx2, by2 = map(int, box.xyxy[0])
             ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
+            full_box = (ox + bx1, oy + by1, ox + bx2, oy + by2)
+            rej = entry.setdefault("_wc_rej", [])
             if math.hypot(ccx - wpt[0], ccy - wpt[1]) > WRIST_CROP_MAX_WRIST_DIST * sw:
+                rej.append(full_box + ("FAR FROM HAND",))
                 continue   # too far from the hand to be held in it (furniture at the crop edge)
             if _pen_like((bx1, by1, bx2, by2), sw, conf):
+                rej.append(full_box + ("PEN-LIKE",))
                 continue   # long thin box: a pen, not a phone
-            if _badge_like((ccx, ccy), students):
+            if _badge_like((ccx, ccy), students, frame, full_box):
+                rej.append(full_box + ("ID BADGE",))
                 continue   # ID badge on a lanyard, not a phone
             if tid not in best or conf > best[tid]["confidence"]:
                 best[tid] = {
@@ -613,12 +625,29 @@ def _pen_like(bbox, ref_sw, conf=None):
     return False
 
 
-def _badge_like(center, students):
+def _white_card_frac(frame, bbox):
+    """Share of near-white, low-saturation pixels inside bbox (ID cards are mostly
+    white; a phone body or a dark screen is not)."""
+    if frame is None or bbox is None:
+        return 0.0
+    fh, fw = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    x1, y1 = max(0, int(x1)), max(0, int(y1))
+    x2, y2 = min(fw, int(x2)), min(fh, int(y2))
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return 0.0
+    hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    white = (hsv[..., 2] > BADGE_WHITE_V) & (hsv[..., 1] < BADGE_WHITE_S)
+    return float(white.mean())
+
+
+def _badge_like(center, students, frame=None, bbox=None):
     """True if `center` is inside some student's chest strip (where an ID badge
     on a lanyard hangs) and none of that student's wrists is right on it."""
     if not BADGE_FILTER_ENABLED:
         return False
     cx, cy = center
+    card_like = _white_card_frac(frame, bbox) >= BADGE_WHITE_FRAC
     for s in students:
         scx, scy = s["shoulder_center"]
         sw = s["shoulder_width"]
@@ -626,6 +655,8 @@ def _badge_like(center, students):
             continue
         if not (scy + BADGE_ZONE_TOP * sw <= cy <= scy + BADGE_ZONE_BOTTOM * sw):
             continue
+        if card_like:
+            return True    # white ID-card look in the chest strip: a badge, even with a hand on it
         hand_limit = BADGE_HAND_HOLD_MULT * sw
         for wr in (s["l_wrist"], s["r_wrist"]):
             if wr is not None and math.hypot(cx - wr[0], cy - wr[1]) < hand_limit:
@@ -1285,6 +1316,12 @@ def _detection_loop(camera_id):
                             (dx1, max(dy1 - 3, 10)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
+            if DEBUG_OVERLAY:
+                for (rx1, ry1, rx2, ry2, why) in entry.get("_wc_rej", []):
+                    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 200, 255), 1)
+                    cv2.putText(frame, why, (rx1, max(ry1 - 4, 10)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
+
             established_ids = {tid for tid, seen in track_first_seen.items()
                                if current_time - seen >= TRACK_MIN_AGE_SEC}
 
@@ -1328,7 +1365,7 @@ def _detection_loop(camera_id):
                         cv2.putText(frame, "PEN-LIKE (ignored)", (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
                     continue
-                if det.get("track_id") is None and _badge_like(det["center"], students):
+                if det.get("track_id") is None and _badge_like(det["center"], students, clean_frame, det["bbox"]):
                     if DEBUG_OVERLAY:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
                         cv2.putText(frame, "ID BADGE (ignored)", (x1, max(y1 - 8, 12)),
