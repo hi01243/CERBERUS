@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r35-badge-appearance"
+BUILD_ID = "2026-10-08-r38-leaky-gaze-posture"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -39,7 +39,7 @@ CURRENT_SESSION = "SESSION_ROOM_A1"
 
 monitoring_active = False  # session-wide arm/disarm toggle
 HEAD_TURN_RATIO_THRESHOLD = 0.55  # horizontal nose-displacement ratio, not a raw angle
-GAZE_DURATION_THRESHOLD = 2.5
+GAZE_DURATION_THRESHOLD = 1.5
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
 SHOULDER_MIN_CONF = 0.3   # shoulders only: lets partly hidden back-row students be tracked
@@ -57,7 +57,7 @@ DETECTION_ENABLED = {
 WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
-WRIST_CROP_IMGSZ        = 640    # crops are upscaled to this before inference
+WRIST_CROP_IMGSZ        = 800    # crops are upscaled to this before inference
 WRIST_CROP_CONF         = 0.25   # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
@@ -65,7 +65,7 @@ WRIST_CROP_MIN_HITS     = 3      # hits needed ...
 WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
 WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
-WRIST_CROP_MODEL        = "yolo11s.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
+WRIST_CROP_MODEL        = "yolo11m.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
 WRIST_CROP_CLASSES      = [67, 65]      # cell phone + remote (a held phone is often called a remote)
 WRIST_CROP_REMOTE_CONF  = 0.35          # stricter bar for the "remote" class
 
@@ -73,8 +73,8 @@ WRIST_CROP_REMOTE_CONF  = 0.35          # stricter bar for the "remote" class
 WRIST_HANDS_CROP         = True   # extra zoomed crop centred between both hands
 WRIST_HANDS_MAX_GAP_SW   = 1.3    # only when the wrists are this close (x shoulder width)
 WRIST_HANDS_MIN_HALF_SW  = 0.60   # hands-crop half-size is at least this x shoulder width
-WRIST_WEAK_CONF          = 0.12   # faint detections count only in the hands-at-chest posture
-WRIST_WEAK_MIN_HITS      = 5
+WRIST_WEAK_CONF          = 0.08   # faint detections count only in the hands-at-chest posture
+WRIST_WEAK_MIN_HITS      = 4
 WRIST_WEAK_WINDOW_SEC    = 3.0
 WRIST_WEAK_MAX_GAP_SW    = 0.9    # wrists no further apart than this ...
 WRIST_WEAK_MIN_DROP_SW   = 0.15   # ... and both between this far below the shoulder line
@@ -131,7 +131,7 @@ REPOSITION_SETTLE_BAND = HEAD_TURN_RATIO_THRESHOLD * 0.3
 STATIC_OBJECT_RADIUS_PX   = 60
 STATIC_OBJECT_MOVE_PX     = 35
 WRIST_CROP_MAX_WRIST_DIST = 0.8   # phone centre must be within this x shoulder width of the wrist
-WRIST_CROP_STATIC_SEC     = 25.0   # a wrist-crop 'phone' this still ...
+WRIST_CROP_STATIC_SEC     = 60.0   # a wrist-crop 'phone' this still ...
 WRIST_CROP_STATIC_MOVE_PX = 8     # ... (moves less than this) is furniture
 HELD_PHONE_WRIST_MULT     = 0.6   # full-frame static filter: a hand this close keeps the phone flagged
 STATIC_PHONE_SEC          = 10.0  # a full-frame 'phone' that never moves this long is furniture,
@@ -173,6 +173,34 @@ PITCH_DOWN_DELTA = 0.30
 HEAD_TURN_STRONG_RATIO = 0.7
 # Grace: gaze timer survives brief dips (blink / noisy frame) without resetting.
 GAZE_GRACE_SEC = 0.8
+
+# --- r38: leaky-bucket gaze timer ---
+GAZE_DRAIN_RATE = 0.5          # seconds of countdown lost per second spent NOT gazing
+
+# --- r38: hands-together phone posture (fallback when the detector sees nothing) ---
+HANDS_POSTURE_ENABLED  = True
+HANDS_POSTURE_SEC      = 4.0   # hold this long before flagging
+HANDS_POSTURE_GRACE_SEC = 1.0  # brief dropouts don't reset the hold
+HANDS_POSTURE_MAX_GAP_SW = 0.75   # wrists no further apart than this x shoulder width
+HANDS_POSTURE_MIN_DROP_SW = 0.15  # both wrists this far below the shoulder line ...
+HANDS_POSTURE_MAX_DROP_SW = 0.75  # ... but no lower (writing on the desk is lower than this)
+
+
+# Motion test: an ID card stays put relative to the shoulders; a phone follows the hand.
+BADGE_LOCK_WINDOW_SEC = 3.0    # history kept per student
+BADGE_LOCK_MIN_SEC    = 1.2    # need this much history before deciding ("CHECKING" until then)
+BADGE_LOCK_STD        = 0.05   # offset-from-shoulders std below this (x shoulder width) = steady
+BADGE_LOCK_MIN_REL    = 0.07   # ... and offset-from-wrist std must exceed this ...
+BADGE_LOCK_RATIO      = 2.0    # ... and be this many times the shoulder-offset std
+
+# --- r37: looking-down must not cancel a running side-gaze ---
+GAZE_DOWN_GRACE_SEC   = 3.0    # a LOOKING DOWN blip keeps a running gaze timer alive this long
+GAZE_DOWN_HYSTERESIS  = 1.7    # while a gaze timer runs, head-drop needed for 'down' is this x PITCH_DOWN_DELTA
+
+# --- r37: wrist-crop phone pass ---
+WRIST_CROP_FLOOR_CONF = 0.05   # inference floor (the real thresholds are applied afterwards)
+WRIST_CROP_AUGMENT    = True   # test-time augmentation (flip/scales); auto-disables if unsupported
+
 # If flagged this long it's a held posture (leaning to write); re-baseline silently.
 GAZE_REBASELINE_SEC = 8.0
 TRACK_LOST_GRACE_SEC = 1.5  # keep per-track state briefly after a track vanishes
@@ -294,7 +322,7 @@ def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
-    for key in ("_wc_hits", "_wc_weak_hits", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
+    for key in ("_wc_hits", "_wc_weak_hits", "_badge_hist", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
         entry.pop(key, None)
 
 
@@ -433,6 +461,20 @@ def _wrist_model(entry):
     return m
 
 
+def _run_wrist_model(entry, crops):
+    """Runs the zoomed-in phone model, with test-time augmentation when possible."""
+    model = _wrist_model(entry)
+    kw = dict(imgsz=WRIST_CROP_IMGSZ, conf=WRIST_CROP_FLOOR_CONF,
+              classes=WRIST_CROP_CLASSES, verbose=False)
+    if WRIST_CROP_AUGMENT and not entry.get("_wc_aug_off"):
+        try:
+            return model(crops, augment=True, **kw)
+        except Exception as e:
+            entry["_wc_aug_off"] = True
+            print(f"[cerberus] augment not usable ({e}); continuing without it")
+    return model(crops, **kw)
+
+
 def _wrist_crop_sample(entry, camera_id, frame, students, now):
     """One zoomed-in phone pass over every established student's wrists."""
     h, w = frame.shape[:2]
@@ -473,8 +515,7 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
     if not crops:
         return
 
-    results = _wrist_model(entry)(crops, imgsz=WRIST_CROP_IMGSZ,
-                                    conf=0.10, classes=WRIST_CROP_CLASSES, verbose=False)
+    results = _run_wrist_model(entry, crops)
     entry["_wc_debug"] = [
         (ox, oy, ox + c.shape[1], oy + c.shape[0], tid,
          max([(float(b.conf[0]), int(b.cls[0])) for b in r.boxes], default=(0.0, -1)))
@@ -507,6 +548,12 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
             if _badge_like((ccx, ccy), students, frame, full_box):
                 rej.append(full_box + ("ID BADGE",))
                 continue   # ID badge on a lanyard, not a phone
+            if tid in _stu:
+                verdict = _torso_lock_verdict(entry, _stu[tid], (ccx, ccy), now)
+                if verdict != "phone":
+                    rej.append(full_box + (("ID BADGE (moves with body)" if verdict == "badge"
+                                            else "CHECKING..."),))
+                    continue
             if tid not in best or conf > best[tid]["confidence"]:
                 best[tid] = {
                     "name":       "CELL PHONE",
@@ -696,6 +743,57 @@ def _hands_at_chest(s):
         return False
     return all(WRIST_WEAK_MIN_DROP_SW * sw <= w[1] - sy <= WRIST_WEAK_MAX_DROP_SW * sw
                for w in (l, r))
+
+
+def _hands_posture(s):
+    """Both wrists together and raised at chest height (a phone cupped in two
+    hands). Lower than HANDS_POSTURE_MAX_DROP_SW means hands on the desk."""
+    l, r = s["l_wrist"], s["r_wrist"]
+    if l is None or r is None:
+        return False
+    sw = s["shoulder_width"]
+    sy = s["shoulder_center"][1]
+    if math.hypot(l[0] - r[0], l[1] - r[1]) > HANDS_POSTURE_MAX_GAP_SW * sw:
+        return False
+    return all(HANDS_POSTURE_MIN_DROP_SW * sw <= w[1] - sy <= HANDS_POSTURE_MAX_DROP_SW * sw
+               for w in (l, r))
+
+
+def _torso_lock_verdict(entry, s, center, now):
+    """'phone' | 'badge' | 'pending' for a candidate at `center` owned by student `s`.
+
+    Only candidates inside the student's chest strip are judged. A badge keeps a
+    steady offset from the shoulders while the hand moves around it; a phone in a
+    hand keeps a steady offset from the HAND."""
+    sw = s["shoulder_width"]
+    scx, scy = s["shoulder_center"]
+    cx, cy = center
+    if not (abs(cx - scx) <= BADGE_ZONE_HALF_W * sw
+            and scy + BADGE_ZONE_TOP * sw <= cy <= scy + BADGE_ZONE_BOTTOM * sw):
+        return "phone"
+    wrists = [wr for wr in (s["l_wrist"], s["r_wrist"]) if wr is not None]
+    if not wrists:
+        return "phone"
+    wr = min(wrists, key=lambda p: math.hypot(cx - p[0], cy - p[1]))
+
+    hist = entry.setdefault("_badge_hist", {}).setdefault(s["track_id"], [])
+    if hist and now - hist[-1][0] > 1.0:
+        hist.clear()                                   # candidate vanished: start over
+    if not hist or now - hist[-1][0] >= 0.05:          # one sample per pass/frame
+        hist.append((now,
+                     ((cx - scx) / sw, (cy - scy) / sw),
+                     ((cx - wr[0]) / sw, (cy - wr[1]) / sw)))
+    hist[:] = [h for h in hist if h[0] >= now - BADGE_LOCK_WINDOW_SEC]
+
+    if len(hist) < 4 or hist[-1][0] - hist[0][0] < BADGE_LOCK_MIN_SEC:
+        return "pending"
+    r = np.array([h[1] for h in hist])
+    d = np.array([h[2] for h in hist])
+    std_r = float(math.hypot(r[:, 0].std(), r[:, 1].std()))
+    std_d = float(math.hypot(d[:, 0].std(), d[:, 1].std()))
+    if std_r < BADGE_LOCK_STD and std_d > max(BADGE_LOCK_MIN_REL, BADGE_LOCK_RATIO * std_r):
+        return "badge"
+    return "phone"
 
 
 def make_status_frame(label, message, sub_message=""):
@@ -936,6 +1034,8 @@ def _detection_loop(camera_id):
             baseline_height  = entry["baseline_height"]
             pitch_history    = entry["pitch_history"]
 
+            _dt = max(0.0, min(0.5, current_time - entry.get("_gz_prev", current_time)))
+            entry["_gz_prev"] = current_time
             cv2.putText(frame, f"CAM: {entry['label']}", (20, h - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
@@ -1176,7 +1276,9 @@ def _detection_loop(camera_id):
                                 smoothed_height = (sum(pitch_history[track_id])
                                                    / len(pitch_history[track_id]))
                                 down_delta   = baseline_height[track_id] - smoothed_height
-                                looking_down = down_delta > PITCH_DOWN_DELTA
+                                looking_down = down_delta > (PITCH_DOWN_DELTA * GAZE_DOWN_HYSTERESIS
+                                                             if track_id in gaze_timers
+                                                             else PITCH_DOWN_DELTA)
 
                                 if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
                                     person_turn = "LOOKING LEFT"
@@ -1225,6 +1327,7 @@ def _detection_loop(camera_id):
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
                         students[-1]["person_turn"] = person_turn
+                        students[-1]["down_delta"] = down_delta
                         last_turn = entry.setdefault("last_turn", {})
                         if last_turn.get(track_id) != person_turn:
                             print(f"[{camera_id}] ID {track_id}: {last_turn.get(track_id, '-')} -> "
@@ -1269,15 +1372,17 @@ def _detection_loop(camera_id):
                                              max(20, shoulder_center[1] - 40)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                         else:
-                            in_grace = False
-                            if track_id in gaze_timers and person_turn != "CALIBRATING":
-                                entry["gaze_lost"].setdefault(track_id, current_time)
-                                in_grace = (current_time - entry["gaze_lost"][track_id]) < GAZE_GRACE_SEC
-                            if not in_grace:
+                            if person_turn == "CALIBRATING":
                                 gaze_timers.pop(track_id, None)
                                 turn_history.pop(track_id, None)
-                                entry["gaze_lost"].pop(track_id, None)
                                 entry.get("_gaze_logged", {}).pop(track_id, None)
+                            elif track_id in gaze_timers:
+                                # Not gazing this frame (forward / looking down / lost neighbour /
+                                # flicker): drain the countdown instead of resetting it.
+                                gaze_timers[track_id] += _dt * (1.0 + GAZE_DRAIN_RATE)
+                                if current_time - gaze_timers[track_id] <= 0.0:
+                                    gaze_timers.pop(track_id, None)
+                                    entry.get("_gaze_logged", {}).pop(track_id, None)
                             if person_turn == "LOOKING DOWN":
                                 cv2.putText(frame, "looking down (ok)",
                                             (shoulder_center[0] - 55,
@@ -1371,6 +1476,19 @@ def _detection_loop(camera_id):
                         cv2.putText(frame, "ID BADGE (ignored)", (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
                     continue
+                if det.get("track_id") is None:
+                    _own = _owner_of_detection(det, students, established_ids)
+                    _os = next((s for s in students if s["track_id"] == _own), None)
+                    if _os is not None:
+                        _verdict = _torso_lock_verdict(entry, _os, det["center"], current_time)
+                        if _verdict != "phone":
+                            if DEBUG_OVERLAY:
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 255), 1)
+                                cv2.putText(frame, ("ID BADGE (moves with body)" if _verdict == "badge"
+                                                    else "CHECKING..."),
+                                            (x1, max(y1 - 8, 12)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 200, 255), 1)
+                            continue
                 if i in static_phone_idx and not _phone_in_hand(det, students):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
                     cv2.putText(frame, "STATIC OBJECT (suppressed)", (x1, max(y1 - 8, 12)),
@@ -1420,6 +1538,37 @@ def _detection_loop(camera_id):
                     for _wr in (_s["l_wrist"], _s["r_wrist"]):
                         if _wr is not None:
                             cv2.circle(frame, _wr, 4, (0, 165, 255), -1)
+            # r38: hands-together phone posture fallback
+            if HANDS_POSTURE_ENABLED and DETECTION_ENABLED["phone"]:
+                _hp = entry.setdefault("_hp", {})
+                _hp_now = set()
+                for _s in students:
+                    _tid = _s["track_id"]
+                    if _tid not in established_ids or _s["person_turn"] == "CALIBRATING":
+                        continue
+                    if not _hands_posture(_s):
+                        continue
+                    _hp_now.add(_tid)
+                    _st = _hp.setdefault(_tid, {"start": current_time, "last": current_time})
+                    _st["last"] = current_time
+                    _held = current_time - _st["start"]
+                    _pos = (_s["shoulder_center"][0] - 60, _s["shoulder_center"][1] + 60)
+                    if _held >= HANDS_POSTURE_SEC:
+                        object_violation = True
+                        violations.append(("OBJECT_PHONE_POSTURE", 0.6, _tid))
+                        if not violation_reason:
+                            violation_reason     = "OBJECT_PHONE_POSTURE"
+                            violation_confidence = 0.6
+                            violating_track_id   = _tid
+                        cv2.putText(frame, "PHONE? (hands at chest)", _pos,
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                    else:
+                        cv2.putText(frame, f"hands up ({HANDS_POSTURE_SEC - _held:.1f}s)", _pos,
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+                for _k in [k for k, v in _hp.items()
+                           if k not in _hp_now and current_time - v["last"] > HANDS_POSTURE_GRACE_SEC]:
+                    _hp.pop(_k, None)
+
             interaction_candidates = [s for s in students if s["track_id"] in established_ids]
             active_reach_pairs = []
             num_students = len(interaction_candidates)
@@ -2313,3 +2462,4 @@ atexit.register(_shutdown)
 if __name__ == '__main__':
     app.run(debug=False, threaded=True,
             host=os.environ.get("CERBERUS_HOST", "127.0.0.1"), port=5000)
+

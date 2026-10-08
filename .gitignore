@@ -40,3 +40,4 @@ incidents.db
 *.pyc
 *.bak
 *cerberus.db
+*.onnx
