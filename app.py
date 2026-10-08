@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r30-wrist-model-s"
+BUILD_ID = "2026-10-08-r32-mid-handoff"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -89,8 +89,10 @@ BADGE_TWO_HAND_MULT  = 0.50   # BOTH wrists this close to the box = phone in two
 # --- NEIGHBOR-AWARE SIDE GAZE ---
 GAZE_REQUIRE_NEIGHBOR = True
 GAZE_NEIGHBOR_MIN_DX  = 0.6   # neighbor must be at least this far to the side
-GAZE_NEIGHBOR_MAX_DX  = 4.0   # ...and no farther than this
+GAZE_NEIGHBOR_MAX_DX  = 5.0   # ...and no farther than this
 GAZE_NEIGHBOR_ROW_MULT = 2.0  # max vertical offset between shoulder centers
+GAZE_NEIGHBOR_ROW_SLOPE = 0.30   # extra row tolerance per shoulder-width of distance (diagonal cameras)
+GAZE_NEIGHBOR_MEMORY_SEC = 8.0   # a neighbour seen on that side this recently still counts
 
 # --- POSE MODEL INFERENCE SETTINGS ---
 POSE_IOU  = 0.5
@@ -141,6 +143,11 @@ REACH_WRIST_CONF                = 0.3    # accept lower conf; wrists are blurry 
 REACH_DEPTH_RATIO_MIN = 0.75  # shoulder-width ratio band — outside this means different rows
 REACH_DEPTH_RATIO_MAX = 1.33
 REACH_MIN_SIDE_GAP_MULTIPLIER = 1.2  # students must be side-by-side, not front-to-back
+# Mutual hand-off: a wrist of EACH student out in the middle band of the gap.
+REACH_MID_MIN_PROGRESS  = 0.30   # fraction of the way from own shoulders to the neighbour's
+REACH_MID_MAX_PROGRESS  = 0.70
+REACH_MID_MIN_EXTENSION = 0.80   # wrist at least this many shoulder-widths from own shoulders
+REACH_MID_MAX_DY        = 2.00   # ...and no more than this far above/below the shoulder line
 
 # --- HEAD-POSE ROBUSTNESS ---
 # Pitch term: nose dropping below baseline => LOOKING DOWN (paper), not a side gaze.
@@ -270,7 +277,7 @@ def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
-    for key in ("_wc_hits", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged"):
+    for key in ("_wc_hits", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
         entry.pop(key, None)
 
 
@@ -342,10 +349,14 @@ def scan_local_cameras(max_index=4):
 add_camera(0, "local", label="cam1")  # default camera so the dashboard is not empty
 
 
-def _neighbor_in_direction(turn, track_id, candidates, kept_idx):
+def _neighbor_in_direction(turn, track_id, candidates, kept_idx, entry=None, now=None):
     """True if another (non-ghost) student sits on the side this student is
     turned toward, in roughly the same row.  `turn` is 'LOOKING LEFT' or
-    'LOOKING RIGHT' (image-left / image-right, matching the yaw sign)."""
+    'LOOKING RIGHT' (image-left / image-right, matching the yaw sign).
+
+    Distances use the larger of the two shoulder widths (perspective), row
+    tolerance grows with distance (diagonal cameras), and a neighbour seen on
+    that side recently still counts (a dropped pose must not reset a gaze)."""
     if not GAZE_REQUIRE_NEIGHBOR or turn not in ("LOOKING LEFT", "LOOKING RIGHT"):
         return True
     me = next((c for c in candidates
@@ -353,15 +364,37 @@ def _neighbor_in_direction(turn, track_id, candidates, kept_idx):
     if me is None:
         return True
     direction = -1 if turn == "LOOKING LEFT" else 1
+    side = "L" if direction < 0 else "R"
+    nearest = {"L": None, "R": None}   # per side: (signed dx, dy) in shoulder widths, for the overlay
+    found = False
     for c in candidates:
         if c["idx"] not in kept_idx or c["track_id"] == track_id:
             continue
-        dx = (c["center"][0] - me["center"][0]) * direction
-        dy = abs(c["center"][1] - me["center"][1])
-        if (GAZE_NEIGHBOR_MIN_DX * me["width"] <= dx <= GAZE_NEIGHBOR_MAX_DX * me["width"]
-                and dy <= GAZE_NEIGHBOR_ROW_MULT * me["width"]):
-            return True
-    return False
+        scale = max(me["width"], c["width"])
+        sdx = (c["center"][0] - me["center"][0]) / scale     # + = neighbour is image-right
+        dy = abs(c["center"][1] - me["center"][1]) / scale
+        dx = sdx * direction
+        s = "R" if sdx > 0 else "L"
+        if nearest[s] is None or abs(sdx) < abs(nearest[s][0]):
+            nearest[s] = (sdx, dy)
+        if (GAZE_NEIGHBOR_MIN_DX <= dx <= GAZE_NEIGHBOR_MAX_DX
+                and dy <= GAZE_NEIGHBOR_ROW_MULT + GAZE_NEIGHBOR_ROW_SLOPE * dx):
+            found = True
+    if entry is not None and now is not None:
+        seen = entry.setdefault("_nb_seen", {}).setdefault(track_id, {})
+        if found:
+            seen[side] = now
+        elif now - seen.get(side, -1e9) <= GAZE_NEIGHBOR_MEMORY_SEC:
+            found = True   # a neighbour was there a moment ago
+    if entry is not None:
+        dbg = entry.setdefault("_nb_dbg", {})
+        if found:
+            dbg.pop(track_id, None)
+        else:
+            def fmt(k):
+                return "-" if nearest[k] is None else f"{nearest[k][0]:+.1f}/{nearest[k][1]:.1f}"
+            dbg[track_id] = f"no neighbor {side} (L {fmt('L')} R {fmt('R')})"
+    return found
 
 
 def _wrist_model(entry):
@@ -623,6 +656,26 @@ def _select_unique_people(candidates, track_first_seen, current_time):
 # ==========================================
 # NOTE-PASSING / REACH TEST
 # ==========================================
+def _mid_band_wrist(a, b):
+    """A wrist of student `a` that is out in the middle band of the gap between
+    a and b (and actually extended away from a's body), or None."""
+    ax, ay = a["shoulder_center"]
+    bx, _by = b["shoulder_center"]
+    gap = bx - ax
+    if abs(gap) < 1:
+        return None
+    sw = a["shoulder_width"]
+    for wrist in (a["l_wrist"], a["r_wrist"]):
+        if wrist is None:
+            continue
+        p = (wrist[0] - ax) / gap
+        if (REACH_MID_MIN_PROGRESS <= p <= REACH_MID_MAX_PROGRESS
+                and math.hypot(wrist[0] - ax, wrist[1] - ay) / sw >= REACH_MID_MIN_EXTENSION
+                and abs(wrist[1] - ay) <= REACH_MID_MAX_DY * sw):
+            return wrist
+    return None
+
+
 def _find_reaching_wrist(reacher, target, same_row):
     """Returns the wrist (x, y) of `reacher` that is reaching toward `target`,
     or None.  See the REACH_* constants for the two tests."""
@@ -631,6 +684,11 @@ def _find_reaching_wrist(reacher, target, same_row):
     sw     = reacher["shoulder_width"]
     gap_x  = tx - rx
 
+    # C: mutual hand-off -- both students have a hand out in the gap between them.
+    if same_row and abs(gap_x) >= 1:
+        mine = _mid_band_wrist(reacher, target)
+        if mine is not None and _mid_band_wrist(target, reacher) is not None:
+            return mine
     for wrist in (reacher["l_wrist"], reacher["r_wrist"]):
         if wrist is None:
             continue
@@ -1086,11 +1144,11 @@ def _detection_loop(camera_id):
 
                         gaze_candidate = (DETECTION_ENABLED["gaze"]
                                           and person_turn not in ("FORWARD", "CALIBRATING", "LOOKING DOWN")
-                                          and _neighbor_in_direction(person_turn, track_id,
-                                                                     candidates, kept_idx))
+                                          and _neighbor_in_direction(person_turn, track_id, candidates, kept_idx,
+                                                                     entry, current_time))
                         if (DETECTION_ENABLED["gaze"] and not gaze_candidate
                                 and person_turn in ("LOOKING LEFT", "LOOKING RIGHT")):
-                            cv2.putText(frame, "turn ignored: no neighbor",
+                            cv2.putText(frame, entry.get("_nb_dbg", {}).get(track_id, "turn ignored: no neighbor"),
                                         (shoulder_center[0] - 70, max(20, shoulder_center[1] - 40)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
                         if gaze_candidate:
@@ -1155,7 +1213,7 @@ def _detection_loop(camera_id):
             for tid in expired:
                 for key in PER_TRACK_KEYS:
                     entry[key].pop(tid, None)
-                for key in ("last_turn", "_gaze_logged"):
+                for key in ("last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
                     entry.get(key, {}).pop(tid, None)
 
             _merge_wrist_phones(entry, camera_id, clean_frame, students,
@@ -1260,6 +1318,11 @@ def _detection_loop(camera_id):
             # ==========================================
             # 4. INTERACTION & DESK LEANING / REACH DETECTION
             # ==========================================
+            if DEBUG_OVERLAY:
+                for _s in students:
+                    for _wr in (_s["l_wrist"], _s["r_wrist"]):
+                        if _wr is not None:
+                            cv2.circle(frame, _wr, 4, (0, 165, 255), -1)
             interaction_candidates = [s for s in students if s["track_id"] in established_ids]
             active_reach_pairs = []
             num_students = len(interaction_candidates)
