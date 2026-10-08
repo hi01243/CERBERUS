@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r39-badge-gaze-fixes"
+BUILD_ID = "2026-10-08-r40-badge-strip-hands"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -91,9 +91,9 @@ PHONE_SMALL_MIN_CONF = 0.60
 # A badge hangs on the chest midline. Any 'phone' centred in that strip is
 # ignored unless a wrist is almost touching it. All values are x shoulder width.
 BADGE_FILTER_ENABLED = True
-BADGE_ZONE_HALF_W    = 0.45   # strip half-width around the shoulder-centre x
+BADGE_ZONE_HALF_W    = 0.60   # strip half-width around the shoulder-centre x
 BADGE_ZONE_TOP       = -0.10   # strip starts this far below the shoulder line
-BADGE_ZONE_BOTTOM    = 1.10   # ...and ends this far below it (above the lap)
+BADGE_ZONE_BOTTOM    = 2.00   # ...and ends this far below it (above the lap)
 BADGE_HAND_HOLD_MULT = 0.30   # wrist this close to the box centre = held phone
 BADGE_TWO_HAND_MULT  = 0.50   # BOTH wrists this close to the box = phone in two hands
 # Appearance test: an ID card is mostly white / low-saturation pixels.
@@ -179,8 +179,8 @@ GAZE_DRAIN_RATE = 0.5          # seconds of countdown lost per second spent NOT 
 
 # --- r38: hands-together phone posture (fallback when the detector sees nothing) ---
 HANDS_POSTURE_ENABLED  = True
-HANDS_POSTURE_SEC      = 4.0   # hold this long before flagging
-HANDS_POSTURE_GRACE_SEC = 1.0  # brief dropouts don't reset the hold
+HANDS_POSTURE_SEC      = 2.5   # hold this long before flagging
+HANDS_POSTURE_GRACE_SEC = 2.0  # brief dropouts don't reset the hold
 HANDS_POSTURE_MAX_GAP_SW = 0.75   # wrists no further apart than this x shoulder width
 HANDS_POSTURE_MIN_DROP_SW = 0.15  # both wrists this far below the shoulder line ...
 HANDS_POSTURE_MAX_DROP_SW = 0.75  # ... but no lower (writing on the desk is lower than this)
