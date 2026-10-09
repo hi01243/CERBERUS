@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-09-r41-two-hand-phone"
+BUILD_ID = "2026-10-09-r42-yaw-hysteresis"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -39,6 +39,7 @@ CURRENT_SESSION = "SESSION_ROOM_A1"
 
 monitoring_active = False  # session-wide arm/disarm toggle
 HEAD_TURN_RATIO_THRESHOLD = 0.55  # horizontal nose-displacement ratio, not a raw angle
+HEAD_TURN_EXIT_RATIO = 0.40  # once turned, stay turned until |yaw| falls below this
 GAZE_DURATION_THRESHOLD = 1.5
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
@@ -1328,9 +1329,14 @@ def _detection_loop(camera_id):
                                                              if track_id in gaze_timers
                                                              else PITCH_DOWN_DELTA)
 
-                                if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
+                                _prev = entry.get("last_turn", {}).get(track_id)
+                                _l_thr = (HEAD_TURN_EXIT_RATIO if _prev == "LOOKING LEFT"
+                                          else HEAD_TURN_RATIO_THRESHOLD)
+                                _r_thr = (HEAD_TURN_EXIT_RATIO if _prev == "LOOKING RIGHT"
+                                          else HEAD_TURN_RATIO_THRESHOLD)
+                                if smoothed_ratio < -_l_thr:
                                     person_turn = "LOOKING LEFT"
-                                elif smoothed_ratio > HEAD_TURN_RATIO_THRESHOLD:
+                                elif smoothed_ratio > _r_thr:
                                     person_turn = "LOOKING RIGHT"
 
                                 if (person_turn != "FORWARD" and looking_down
