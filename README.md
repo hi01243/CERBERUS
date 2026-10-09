@@ -48,7 +48,7 @@ Internally, flags are logged under these types:
 - A webcam, IP camera, or video file to test with
 - The YOLO weights `yolo11n-pose.pt`, `yolo11n.pt`, and `yolo11m.pt`. Ultralytics downloads them on first run unless you place them next to `app.py`, so the first run needs internet access. `yolo11m.pt` (about 40 MB) powers the zoomed-in phone check; if it cannot be loaded, CERBERUS falls back to the nano model and prints a message
 - **Recommended:** `ffmpeg` on your PATH. Without it, some recordings may not play in the browser
-- **Strongly recommended:** an NVIDIA GPU with a CUDA build of PyTorch. CERBERUS uses it automatically when PyTorch can see it (see [Performance](#performance))
+- **A computer with a good NVIDIA GPU and a CUDA build of PyTorch is needed to run CERBERUS smoothly.** CERBERUS uses the GPU automatically when PyTorch can see it. It will run on a CPU, but slowly (see [Hardware](#hardware-a-good-gpu-is-needed-for-smooth-use) and [Performance](#performance))
 
 ## Installation
 
@@ -158,6 +158,29 @@ Deleting or resetting a session removes its database rows, recordings, and evide
 
 ## How detection works
 
+### Models used
+
+| Model | Used for | Settings |
+|-------|----------|----------|
+| `yolo11n-pose.pt` (YOLO11 nano pose) | Finds each student's body keypoints (nose, shoulders, wrists) for the Gaze and Reach rules and to locate wrists for the phone check. Run with ByteTrack (`bytetrack.yaml`) to give each student a stable ID | Input 960 px (`POSE_IMGSZ`), confidence 0.25, IoU 0.5 |
+| `yolo11n.pt` (YOLO11 nano detection) | Full-frame phone check, every frame. Only COCO class 67 (cell phone) is requested | Input 960 px, flagged above 0.45 confidence |
+| `yolo11m.pt` (YOLO11 medium detection) | Zoomed-in wrist-crop phone check, about 3 times a second. Requests COCO class 67 (cell phone) and class 65 (remote, which a held phone is often labelled as) | Crops upscaled to 800 px (`WRIST_CROP_IMGSZ`), test-time augmentation on, inference floor 0.05 with the real thresholds applied afterwards |
+
+All three are pretrained Ultralytics YOLO11 models trained on COCO. CERBERUS does not fine-tune or retrain them. Everything after the model output (head turn, hand-off, badge and pen filters, timers) is hand-written geometry and rules. If `yolo11m.pt` cannot be loaded, the wrist-crop check uses `yolo11n.pt` instead. Each active camera loads its own copy of the models. ByteTrack needs the `lapx` package, which is in the install line.
+
+### Hardware: a good GPU is needed for smooth use
+
+Every frame goes through two models (pose and full-frame phone detection), and the larger `yolo11m` model with test-time augmentation re-checks every wrist crop about 3 times a second. That is a lot of work for a CPU. **Use a computer with a good NVIDIA GPU and a CUDA build of PyTorch.**
+
+- **With a suitable GPU**, the live feed and flags can keep up with real time.
+- **Without one** (CPU or integrated graphics), expect a low frame rate and laggy video, and timing-based rules such as gaze and reach react late because they see fewer frames. Video-file cameras play in slow motion, though the flags stay the same because of `VIDEO_CLOCK`.
+- The load grows with the number of students (more wrist crops) and the number of active cameras (each runs its own detection thread and model copies on the same GPU). A full room or several cameras needs a stronger GPU.
+- Check that PyTorch sees your GPU with `python -c "import torch; print(torch.cuda.is_available())"`, which should print `True`.
+
+If your machine is too slow, see [Performance](#performance) for the settings that trade accuracy for speed.
+
+### Pipeline
+
 Students are tracked with the pose model and ByteTrack. A student needs both shoulders visible (confidence 0.3 or more) to be tracked at all, and a track must be at least 1 second old before it can be blamed for a phone or a reach. Per-student state survives tracking drops of up to 1.5 seconds. Duplicate ("ghost") skeletons are filtered out.
 
 ### Phone
@@ -207,12 +230,10 @@ Only students who are side by side, in the same row, and at a similar depth are 
 ## Known limitations
 
 - Subtle phone use is still easy to miss, and a phone under a desk or in a lap may not be seen.
-- Smartwatches and cheat sheets are not detected.
 - Gaze only covers a student looking at a neighbour to the side. Looking at the student in front or behind is not flagged.
 - Reach and gaze use 2D geometry from one camera angle, so overlapping students at different depths can confuse them.
 - Matching a phone to a student is a best-effort nearest-shoulder guess, not verified possession.
 - Calculators can be flagged as phones, so use the Phone rule toggle.
 - The ID-badge filter can ignore a white-cased phone in the chest area, even when it is held, and the hands-at-chest fallback can flag someone who simply keeps their hands together at chest height for 3 seconds.
 - Small objects in the back rows of a large room are only a few pixels wide and will be missed.
-- Only one live session runs at a time, shared by the whole app.
 - Video lag on weaker machines. Run on a GPU or use fewer cameras for large rooms.
