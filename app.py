@@ -22,7 +22,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-09-r42-yaw-hysteresis"
+BUILD_ID = "2026-10-08-r40-badge-strap-gaze"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -39,7 +39,6 @@ CURRENT_SESSION = "SESSION_ROOM_A1"
 
 monitoring_active = False  # session-wide arm/disarm toggle
 HEAD_TURN_RATIO_THRESHOLD = 0.55  # horizontal nose-displacement ratio, not a raw angle
-HEAD_TURN_EXIT_RATIO = 0.40  # once turned, stay turned until |yaw| falls below this
 GAZE_DURATION_THRESHOLD = 1.5
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
@@ -191,8 +190,8 @@ HANDS_POSTURE_MAX_DROP_SW = 0.75  # ... but no lower (writing on the desk is low
 BADGE_LOCK_WINDOW_SEC = 3.0    # history kept per student
 BADGE_LOCK_MIN_SEC    = 1.2    # need this much history before deciding ("CHECKING" until then)
 BADGE_LOCK_STD        = 0.05   # offset-from-shoulders std below this (x shoulder width) = steady
-BADGE_LOCK_MIN_REL    = 0.10   # ... and offset-from-wrist std must exceed this ...
-BADGE_LOCK_RATIO      = 3.0    # ... and be this many times the shoulder-offset std
+BADGE_LOCK_MIN_REL    = 0.07   # ... and offset-from-wrist std must exceed this ...
+BADGE_LOCK_RATIO      = 2.0    # ... and be this many times the shoulder-offset std
 
 # --- r37: looking-down must not cancel a running side-gaze ---
 GAZE_DOWN_GRACE_SEC   = 3.0    # a LOOKING DOWN blip keeps a running gaze timer alive this long
@@ -740,12 +739,6 @@ def _badge_like(center, students, frame=None, bbox=None):
             continue
         if card_like:
             return True    # white ID-card look in the chest strip: a badge, even with a hand on it
-        # r41 two-hand: both hands round it = phone, regardless of any lanyard
-        _both = [wr for wr in (s["l_wrist"], s["r_wrist"])
-                 if wr is not None
-                 and math.hypot(cx - wr[0], cy - wr[1]) < BADGE_TWO_HAND_MULT * sw]
-        if len(_both) == 2:
-            return False
         strap = _lanyard_above(frame, bbox, s)
         hand_limit = BADGE_HAND_HOLD_MULT * sw
         for wr in (s["l_wrist"], s["r_wrist"]):
@@ -819,14 +812,10 @@ def _torso_lock_verdict(entry, s, center, now):
     wrists = [wr for wr in (s["l_wrist"], s["r_wrist"]) if wr is not None]
     if not wrists:
         return "phone"
-    # r41 two-hand: both hands wrapped round the candidate = phone, never a badge
-    if sum(1 for p in wrists
-           if math.hypot(cx - p[0], cy - p[1]) < BADGE_TWO_HAND_MULT * sw) == 2:
-        return "phone"
     wr = min(wrists, key=lambda p: math.hypot(cx - p[0], cy - p[1]))
 
     hist = entry.setdefault("_badge_hist", {}).setdefault(s["track_id"], [])
-    if hist and now - hist[-1][0] > 2.5:
+    if hist and now - hist[-1][0] > 1.0:
         hist.clear()                                   # candidate vanished: start over
     if not hist or now - hist[-1][0] >= 0.05:          # one sample per pass/frame
         hist.append((now,
@@ -1329,14 +1318,9 @@ def _detection_loop(camera_id):
                                                              if track_id in gaze_timers
                                                              else PITCH_DOWN_DELTA)
 
-                                _prev = entry.get("last_turn", {}).get(track_id)
-                                _l_thr = (HEAD_TURN_EXIT_RATIO if _prev == "LOOKING LEFT"
-                                          else HEAD_TURN_RATIO_THRESHOLD)
-                                _r_thr = (HEAD_TURN_EXIT_RATIO if _prev == "LOOKING RIGHT"
-                                          else HEAD_TURN_RATIO_THRESHOLD)
-                                if smoothed_ratio < -_l_thr:
+                                if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
                                     person_turn = "LOOKING LEFT"
-                                elif smoothed_ratio > _r_thr:
+                                elif smoothed_ratio > HEAD_TURN_RATIO_THRESHOLD:
                                     person_turn = "LOOKING RIGHT"
 
                                 if (person_turn != "FORWARD" and looking_down
