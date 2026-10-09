@@ -140,6 +140,7 @@ A video-file camera loops its clip and processes every frame, so it plays only a
 - Session names are unique across accounts.
 - When upgrading from a build without ownership, existing sessions go to the first account created.
 - Turning MFA off (at `/security/mfa`) requires a current authenticator code.
+- MFA is standard TOTP (6 digits, 30-second steps, SHA-1), so any authenticator app works. The previous and next code are also accepted to allow for clock drift. It is built into CERBERUS and needs no extra package.
 
 ### Deleting data
 
