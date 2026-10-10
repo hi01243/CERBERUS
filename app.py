@@ -66,7 +66,7 @@ WRIST_CROP_MIN_HITS     = 3      # hits needed ...
 WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
 WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
-WRIST_CROP_MODEL        = "yolo11m.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
+WRIST_CROP_MODEL        = "yolo11n.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
 WRIST_CROP_CLASSES      = [67, 65]      # cell phone + remote (a held phone is often called a remote)
 WRIST_CROP_REMOTE_CONF  = 0.35          # stricter bar for the "remote" class
 
