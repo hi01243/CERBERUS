@@ -12,6 +12,11 @@ from datetime import datetime
 from collections import deque
 import math
 import numpy as np
+try:
+    import torch
+    USE_HALF = bool(torch.cuda.is_available())   # fp16 only makes sense on a CUDA GPU
+except Exception:
+    USE_HALF = False
 
 
 from database import init_db, log_violation, get_recent_violations, clear_violations
@@ -22,7 +27,7 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-09-r42-yaw-hysteresis"
+BUILD_ID = "2026-10-09-r43-phone-speed"
 print(f"[cerberus] app.py build {BUILD_ID}")
 
 app = Flask(__name__)
@@ -58,7 +63,7 @@ DETECTION_ENABLED = {
 WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
-WRIST_CROP_IMGSZ        = 800    # crops are upscaled to this before inference
+WRIST_CROP_IMGSZ        = 640    # crops are upscaled to this before inference
 WRIST_CROP_CONF         = 0.25   # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
@@ -200,7 +205,7 @@ GAZE_DOWN_HYSTERESIS  = 2.5    # while a gaze timer runs, head-drop needed for '
 
 # --- r37: wrist-crop phone pass ---
 WRIST_CROP_FLOOR_CONF = 0.05   # inference floor (the real thresholds are applied afterwards)
-WRIST_CROP_AUGMENT    = True   # test-time augmentation (flip/scales); auto-disables if unsupported
+WRIST_CROP_AUGMENT    = False   # test-time augmentation (flip/scales); auto-disables if unsupported
 
 # If flagged this long it's a held posture (leaning to write); re-baseline silently.
 GAZE_REBASELINE_SEC = 30.0
@@ -466,7 +471,7 @@ def _run_wrist_model(entry, crops):
     """Runs the zoomed-in phone model, with test-time augmentation when possible."""
     model = _wrist_model(entry)
     kw = dict(imgsz=WRIST_CROP_IMGSZ, conf=WRIST_CROP_FLOOR_CONF,
-              classes=WRIST_CROP_CLASSES, verbose=False)
+              classes=WRIST_CROP_CLASSES, verbose=False, half=USE_HALF)
     if WRIST_CROP_AUGMENT and not entry.get("_wc_aug_off"):
         try:
             return model(crops, augment=True, **kw)
@@ -515,6 +520,7 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
             break
     if not crops:
         return
+    entry["_wc_ncrops"] = len(crops)
 
     results = _run_wrist_model(entry, crops)
     entry["_wc_debug"] = [
@@ -598,7 +604,13 @@ def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_det
         confirmed = entry.setdefault("_wc_confirmed", {})
         if now - entry.get("_wc_last", 0.0) >= WRIST_CROP_INTERVAL_SEC:
             entry["_wc_last"] = now
+            _t0 = time.perf_counter()
             _wrist_crop_sample(entry, camera_id, clean_frame, students, now)
+            _n = entry["_wc_n"] = entry.get("_wc_n", 0) + 1
+            entry["_wc_sum"] = entry.get("_wc_sum", 0.0) + (time.perf_counter() - _t0)
+            if _n % 20 == 0:
+                print(f"[{camera_id}] wrist pass: {entry['_wc_sum'] / _n * 1000:.0f} ms avg, "
+                      f"{entry.get('_wc_ncrops', 0)} crops last pass")
 
         for tid in [t for t, c in confirmed.items() if c["until"] < now]:
             del confirmed[tid]
@@ -1112,7 +1124,9 @@ def _detection_loop(camera_id):
             # ==========================================
             object_detections = []
             try:
-                obj_results = entry["object_model"](frame, stream=True, verbose=False, classes=[67], imgsz=960)
+                obj_results = (entry["object_model"](frame, stream=True, verbose=False, classes=[67],
+                                                     imgsz=960, half=USE_HALF)
+                               if DETECTION_ENABLED["phone"] else [])
                 for r in obj_results:
                     for box in r.boxes:
                         cls_id     = int(box.cls[0])
@@ -1145,6 +1159,7 @@ def _detection_loop(camera_id):
                     iou=POSE_IOU,
                     imgsz=POSE_IMGSZ,
                     conf=POSE_CONF,
+                    half=USE_HALF,
                 )
 
                 for r in pose_results:
