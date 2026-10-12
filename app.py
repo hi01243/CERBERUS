@@ -12,9 +12,18 @@ from datetime import datetime
 from collections import deque
 import math
 import numpy as np
+try:
+    import torch
+    _CUDA = bool(torch.cuda.is_available())
+    _GPU_NAME = torch.cuda.get_device_name(0) if _CUDA else ""
+except Exception:
+    _CUDA, _GPU_NAME = False, ""
+DEVICE = 0 if _CUDA else "cpu"   # NVIDIA GPU when CUDA works, otherwise CPU
+USE_HALF = _CUDA                 # fp16 only makes sense on a CUDA GPU
 
 
 from database import init_db, log_violation, get_recent_violations, clear_violations
+import phone_verify as _pv   # r47: Stage 2 phone verification
 from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        list_incidents, list_incident_sessions, clear_incidents, dismiss_incident,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
@@ -22,8 +31,10 @@ from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user)
 
-BUILD_ID = "2026-10-08-r40-badge-strap-gaze"
+BUILD_ID = "2026-10-11-r47-phone-verify"
 print(f"[cerberus] app.py build {BUILD_ID}")
+_where = ("GPU: " + _GPU_NAME) if _CUDA else "CPU (torch.cuda.is_available() is False)"
+print(f"[cerberus] inference on {_where}{', half precision' if USE_HALF else ''}")
 
 app = Flask(__name__)
 
@@ -39,6 +50,7 @@ CURRENT_SESSION = "SESSION_ROOM_A1"
 
 monitoring_active = False  # session-wide arm/disarm toggle
 HEAD_TURN_RATIO_THRESHOLD = 0.55  # horizontal nose-displacement ratio, not a raw angle
+HEAD_TURN_EXIT_RATIO = 0.40  # once turned, stay turned until |yaw| falls below this
 GAZE_DURATION_THRESHOLD = 1.5
 ATTRIBUTION_RADIUS_MULTIPLIER = 4.0
 MIN_KEYPOINT_CONF = 0.5
@@ -57,23 +69,49 @@ DETECTION_ENABLED = {
 WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
-WRIST_CROP_IMGSZ        = 800    # crops are upscaled to this before inference
-WRIST_CROP_CONF         = 0.25   # lower than the full-frame 0.45; persistence compensates
+WRIST_CROP_IMGSZ        = 640    # crops are upscaled to this before inference
+WRIST_CROP_CONF         = 0.80  # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
 WRIST_CROP_MIN_HITS     = 3      # hits needed ...
 WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
 WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
-WRIST_CROP_MODEL        = "yolo11m.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
-WRIST_CROP_CLASSES      = [67, 65]      # cell phone + remote (a held phone is often called a remote)
-WRIST_CROP_REMOTE_CONF  = 0.35          # stricter bar for the "remote" class
+WRIST_CROP_MODEL        = "best.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
+PHONE_MODEL = WRIST_CROP_MODEL   # full-frame pass uses the same trained phone model -> only 2 models load (set "yolo11n.pt" to go back)
+WRIST_CROP_CLASSES      = [0]   # class 0 = cell phone in the trained model
+
+# --- PHONE FRAME SKIP (r46) ---
+PHONE_FULL_EVERY_N = 2   # full-frame phone pass runs on every Nth frame (1 = every frame)
+
+# --- STAGE-2 PHONE VERIFIER (r47, see phone_verify.py) ---
+# "off"    = old pen/badge/torso filters only (r46 behaviour)
+# "shadow" = old filters still decide; the verifier only draws its verdict next to each candidate
+# "on"     = the verifier decides; the old pen/badge/torso filters are skipped for phones
+PHONE_VERIFY = "off"
+PHONE_VERIFY_DUMP = True             # True: save candidate crops for calibration (python phone_verify.py --probe)
+PHONE_VERIFY_DUMP_DIR = "phone_candidates"
+PHONE_FULL_CONF = 0.80        # full-frame phone pass: confidence needed (was 0.45)
+# --- HAND-RISE CONDITION (r48) ---
+# A phone only counts if the student's hand was recently down low or out of sight
+# (pocket / lap / bag), i.e. it "came from somewhere". Set False to switch off.
+PHONE_NEEDS_HAND_RISE = True
+HAND_LOW_SW           = 1.0    # wrist this far below the shoulder line (x shoulder width) = "low"
+HAND_LOW_MIN_SEC      = 0.3    # must stay low / out of sight this long to count
+HAND_RISE_MEMORY_SEC  = 10.0   # a phone may appear this long after the hand was low
+HAND_RISE_KEEP_SEC    = 2.0    # an accepted phone stays allowed while it keeps being detected
+PHONE_FULL_NEEDS_HAND = True  # full-frame phone only counts if a hand is near it
+
+# --- WRIST-CROP REST SKIP (r46) ---
+WRIST_CROP_REST_SKIP        = True   # skip a crop if the last check found nothing and the hand has not moved
+WRIST_CROP_REST_MOVE_SW     = 0.25   # "has not moved" = less than this x shoulder width
+WRIST_CROP_REST_RECHECK_SEC = 2.0    # ...but look again at least this often
 
 # --- HANDS-TOGETHER PHONE CROP + WEAK-EVIDENCE PATH (r34) ---
 WRIST_HANDS_CROP         = True   # extra zoomed crop centred between both hands
 WRIST_HANDS_MAX_GAP_SW   = 1.3    # only when the wrists are this close (x shoulder width)
 WRIST_HANDS_MIN_HALF_SW  = 0.60   # hands-crop half-size is at least this x shoulder width
-WRIST_WEAK_CONF          = 0.08   # faint detections count only in the hands-at-chest posture
+WRIST_WEAK_CONF          = 0.99   # faint detections count only in the hands-at-chest posture
 WRIST_WEAK_MIN_HITS      = 4
 WRIST_WEAK_WINDOW_SEC    = 3.0
 WRIST_WEAK_MAX_GAP_SW    = 0.9    # wrists no further apart than this ...
@@ -86,6 +124,7 @@ PHONE_MIN_SHORT_SW = 0.08   # box short side must be >= this x shoulder width
 PHONE_TINY_SW        = 0.18   # long side below this x shoulder width: always rejected
 PHONE_SMALL_SW       = 0.32   # long side below this: needs high confidence
 PHONE_SMALL_MIN_CONF = 0.60
+PHONE_MAX_LONG_SW   = 0.80   # long side above this x shoulder width: too big to be a phone
 
 # --- ID-BADGE / LANYARD FILTER (phones) ---
 # A badge hangs on the chest midline. Any 'phone' centred in that strip is
@@ -171,14 +210,12 @@ REACH_MID_MAX_DY        = 2.00   # ...and no more than this far above/below the 
 PITCH_DOWN_DELTA = 0.30
 # Strong yaw overrides the pitch excuse — only moderate readings can be dismissed.
 HEAD_TURN_STRONG_RATIO = 0.7
-# Grace: gaze timer survives brief dips (blink / noisy frame) without resetting.
-GAZE_GRACE_SEC = 0.8
 
 # --- r38: leaky-bucket gaze timer ---
 GAZE_DRAIN_RATE = 0.5          # seconds of countdown lost per second spent NOT gazing
 
 # --- r38: hands-together phone posture (fallback when the detector sees nothing) ---
-HANDS_POSTURE_ENABLED  = True
+HANDS_POSTURE_ENABLED  = False
 HANDS_POSTURE_SEC      = 3.0   # hold this long before flagging
 HANDS_POSTURE_GRACE_SEC = 1.5  # brief dropouts don't reset the hold
 HANDS_POSTURE_MAX_GAP_SW = 0.75   # wrists no further apart than this x shoulder width
@@ -190,16 +227,15 @@ HANDS_POSTURE_MAX_DROP_SW = 0.75  # ... but no lower (writing on the desk is low
 BADGE_LOCK_WINDOW_SEC = 3.0    # history kept per student
 BADGE_LOCK_MIN_SEC    = 1.2    # need this much history before deciding ("CHECKING" until then)
 BADGE_LOCK_STD        = 0.05   # offset-from-shoulders std below this (x shoulder width) = steady
-BADGE_LOCK_MIN_REL    = 0.07   # ... and offset-from-wrist std must exceed this ...
-BADGE_LOCK_RATIO      = 2.0    # ... and be this many times the shoulder-offset std
+BADGE_LOCK_MIN_REL    = 0.10   # ... and offset-from-wrist std must exceed this ...
+BADGE_LOCK_RATIO      = 3.0    # ... and be this many times the shoulder-offset std
 
 # --- r37: looking-down must not cancel a running side-gaze ---
-GAZE_DOWN_GRACE_SEC   = 3.0    # a LOOKING DOWN blip keeps a running gaze timer alive this long
 GAZE_DOWN_HYSTERESIS  = 2.5    # while a gaze timer runs, head-drop needed for 'down' is this x PITCH_DOWN_DELTA
 
 # --- r37: wrist-crop phone pass ---
-WRIST_CROP_FLOOR_CONF = 0.05   # inference floor (the real thresholds are applied afterwards)
-WRIST_CROP_AUGMENT    = True   # test-time augmentation (flip/scales); auto-disables if unsupported
+WRIST_CROP_FLOOR_CONF = 0.35   # inference floor (the real thresholds are applied afterwards)
+WRIST_CROP_AUGMENT    = False   # test-time augmentation (flip/scales); auto-disables if unsupported
 
 # If flagged this long it's a held posture (leaning to write); re-baseline silently.
 GAZE_REBASELINE_SEC = 30.0
@@ -211,12 +247,17 @@ RECORD_RAW = False   # True: record the clean frame (no overlays) so a run can b
 # ==========================================
 # DYNAMIC CAMERA REGISTRY
 # ==========================================
+# --- LIVE-CAMERA SPEED (r46) ---
+THREADED_CAPTURE    = True   # live cameras: a background thread always holds the newest frame
+SMOOTH_DISPLAY      = True   # live cameras: video runs at camera speed, boxes lag a little behind
+OVERLAY_MAX_AGE_SEC = 3.0    # stop drawing old boxes if detection stalls longer than this
+
 camera_registry = {}
 registry_lock = threading.Lock()
 _next_camera_num = 1
 
-# COCO class 67 = cell phone (the only prohibited object class)
-PROHIBITED_CLASSES = {67: "CELL PHONE"}
+# Class 0 of the trained phone model (best.pt) is "cell phone".
+PROHIBITED_CLASSES = {0: "CELL PHONE"}
 
 
 def _generate_camera_id():
@@ -233,6 +274,124 @@ def _finish_recording(entry):
     entry["recorder"].close()
 
 
+class ThreadedCapture:
+    """Stand-in for cv2.VideoCapture on LIVE cameras.
+
+    A background thread keeps reading, so the camera never queues old frames and
+    read() always returns the NEWEST frame.  latest() lets the display thread show
+    video at camera speed while the models are still busy."""
+
+    def __init__(self, source):
+        self._cap = cv2.VideoCapture(source)
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._lock = threading.Lock()
+        self._frame = None
+        self._seq = 0        # frames received so far
+        self._taken = 0      # last frame number handed out by read()
+        self._failed = False
+        self._stop = threading.Event()
+        self._thread = None
+        if self._cap.isOpened():
+            self._thread = threading.Thread(target=self._run, daemon=True, name="grabber")
+            self._thread.start()
+
+    def _run(self):
+        misses = 0
+        while not self._stop.is_set():
+            ok, frame = self._cap.read()
+            if ok and frame is not None:
+                misses = 0
+                with self._lock:
+                    self._frame = frame
+                    self._seq += 1
+                    self._failed = False
+            else:
+                misses += 1
+                if misses >= 3:
+                    with self._lock:
+                        self._failed = True
+                time.sleep(0.05)
+
+    def isOpened(self):
+        return self._cap.isOpened()
+
+    def grab(self):
+        return True          # the background thread already drains the camera
+
+    def get(self, prop):
+        return self._cap.get(prop)
+
+    def set(self, prop, value):
+        return self._cap.set(prop, value)
+
+    def read(self, timeout=3.0):
+        """(True, newest frame not handed out yet) or (False, None) if the camera went quiet."""
+        end = time.time() + timeout
+        while not self._stop.is_set():
+            with self._lock:
+                if self._frame is not None and self._seq != self._taken:
+                    self._taken = self._seq
+                    return True, self._frame.copy()
+                if self._failed:
+                    return False, None
+            if time.time() > end:
+                return False, None
+            time.sleep(0.004)
+        return False, None
+
+    def latest(self):
+        """(frame number, newest frame) for display.  Copy it before drawing on it."""
+        with self._lock:
+            return self._seq, self._frame
+
+    def release(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+        if self._thread is None or not self._thread.is_alive():
+            self._cap.release()
+
+
+def _open_capture(source, cam_type):
+    """Live cameras get the background reader; video files stay a plain VideoCapture
+    so every frame is processed (nothing is skipped while testing on files)."""
+    if cam_type != "file" and THREADED_CAPTURE:
+        return ThreadedCapture(source)
+    cap = cv2.VideoCapture(source)
+    if cam_type != "file":
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+
+def _display_loop(camera_id, gen):
+    """Smooth live view: the newest camera frame with the boxes/text of the latest
+    detection pasted on top.  The detection loop only hands over the pixels it drew
+    (entry['_overlay']); this thread does the rest at camera speed."""
+    entry = camera_registry.get(camera_id)
+    if entry is None:
+        return
+    last_seq = -1
+    while not entry["stop_event"].is_set() and entry.get("_display_gen") == gen:
+        cap = entry.get("cap")
+        ov = entry.get("_overlay")
+        if ov is None or not isinstance(cap, ThreadedCapture):
+            time.sleep(0.03)     # detection loop publishes its own frames (paused / reconnecting)
+            continue
+        seq, raw = cap.latest()
+        if raw is None or seq == last_seq:
+            time.sleep(0.004)
+            continue
+        last_seq = seq
+        try:
+            out = raw.copy()
+            if time.time() - ov["t"] <= OVERLAY_MAX_AGE_SEC and ov["frame"].shape == out.shape:
+                out[ov["mask"]] = ov["frame"][ov["mask"]]
+            ok, buf = cv2.imencode('.jpg', out, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                entry["latest_frame"] = buf.tobytes()
+        except Exception as e:
+            print(f"[{camera_id}] display error: {e}")
+            time.sleep(0.1)
 def add_camera(source, cam_type, label=None):
     """Registers a camera as INACTIVE.  Does not open the device or load
     models -- that happens on activate_camera().
@@ -290,19 +449,29 @@ def activate_camera(cam_id):
 
     with entry["lock"]:
         if entry["cap"] is None:
-            cap = cv2.VideoCapture(entry["source"])
+            cap = _open_capture(entry["source"], entry["type"])
             if not cap.isOpened():
+                cap.release()
                 return False, f"Could not open camera source: {entry['source']}"
-            if entry["type"] != "file":
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             entry["cap"] = cap
 
         if entry["pose_model"] is None:
             entry["pose_model"] = YOLO('yolo11n-pose.pt')
         if entry["object_model"] is None:
-            entry["object_model"] = YOLO('yolo11n.pt')
+            try:
+                entry["object_model"] = YOLO(PHONE_MODEL)
+            except Exception as e:
+                return False, f"Could not load phone model {PHONE_MODEL}: {e}"
+            if PHONE_MODEL == WRIST_CROP_MODEL:
+                entry["wrist_model"] = entry["object_model"]   # same weights: one model, loaded once
+            print(f"[cerberus] phone model {PHONE_MODEL}: classes {entry['object_model'].names}")
 
         entry["stop_event"].clear()
+        entry["_smooth_display"] = bool(SMOOTH_DISPLAY and isinstance(entry["cap"], ThreadedCapture))
+        if entry["_smooth_display"]:
+            gen = entry["_display_gen"] = entry.get("_display_gen", 0) + 1
+            threading.Thread(target=_display_loop, args=(cam_id, gen),
+                             daemon=True, name=f"display-{cam_id}").start()
         t = threading.Thread(target=_detection_loop, args=(cam_id,),
                              daemon=True, name=f"detect-{cam_id}")
         entry["thread"] = t
@@ -320,9 +489,12 @@ PER_TRACK_KEYS = ("gaze_timers", "turn_history", "baseline_ratio", "calibration_
 
 def _clear_tracking_state(entry):
     """Wipes every per-track dict on a camera entry."""
+    entry.pop("_overlay", None)
+    entry.pop("_wc_rest", None)
+    entry.pop("_obj_cache", None)
     for key in PER_TRACK_KEYS + ("reach_timers", "static_phones", "static_wc"):
         entry[key].clear()
-    for key in ("_wc_hits", "_wc_weak_hits", "_badge_hist", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg", "_turn_hold"):
+    for key in ("_wc_hits", "_wc_weak_hits", "_badge_hist", "_wc_confirmed", "_wc_last", "_wc_debug", "last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg", "_turn_hold", "_pv", "_hand_low", "_phone_ok"):
         entry.pop(key, None)
 
 
@@ -465,7 +637,8 @@ def _run_wrist_model(entry, crops):
     """Runs the zoomed-in phone model, with test-time augmentation when possible."""
     model = _wrist_model(entry)
     kw = dict(imgsz=WRIST_CROP_IMGSZ, conf=WRIST_CROP_FLOOR_CONF,
-              classes=WRIST_CROP_CLASSES, verbose=False)
+              classes=WRIST_CROP_CLASSES, verbose=False,
+              device=DEVICE, half=USE_HALF)
     if WRIST_CROP_AUGMENT and not entry.get("_wc_aug_off"):
         try:
             return model(crops, augment=True, **kw)
@@ -475,25 +648,37 @@ def _run_wrist_model(entry, crops):
     return model(crops, **kw)
 
 
+def _wrist_can_rest(entry, key, pos, sw, now):
+    """True if this wrist was checked a moment ago, held nothing, and has barely moved.
+    A hand that moves (or the periodic re-check) brings it straight back."""
+    if not WRIST_CROP_REST_SKIP:
+        return False
+    st = entry.get("_wc_rest", {}).get(key)
+    if st is None or not st["empty"] or now - st["t"] >= WRIST_CROP_REST_RECHECK_SEC:
+        return False
+    return math.hypot(pos[0] - st["pos"][0], pos[1] - st["pos"][1]) < WRIST_CROP_REST_MOVE_SW * sw
 def _wrist_crop_sample(entry, camera_id, frame, students, now):
     """One zoomed-in phone pass over every established student's wrists."""
     h, w = frame.shape[:2]
     entry["_wc_rej"] = []
-    crops, meta = [], []
+    crops, meta, rest_keys = [], [], []
     for s in students:
         tid = s["track_id"]
         if now - entry["track_first_seen"].get(tid, now) < TRACK_MIN_AGE_SEC:
             continue
         half = int(max(WRIST_CROP_MIN_HALF_PX, s["shoulder_width"] * WRIST_CROP_SCALE / 2.0))
-        for wrist in (s["l_wrist"], s["r_wrist"]):
+        for side, wrist in (("L", s["l_wrist"]), ("R", s["r_wrist"])):
             if wrist is None:
                 continue
+            if _wrist_can_rest(entry, (tid, side), wrist, s["shoulder_width"], now):
+                continue   # checked a moment ago, held nothing, has not moved
             x1, y1 = max(0, wrist[0] - half), max(0, wrist[1] - half)
             x2, y2 = min(w, wrist[0] + half), min(h, wrist[1] + half)
             if x2 - x1 < 16 or y2 - y1 < 16:
                 continue
             crops.append(frame[y1:y2, x1:x2].copy())
             meta.append((tid, x1, y1, wrist, s["shoulder_width"]))
+            rest_keys.append(((tid, side), wrist, s["shoulder_width"]))
             if len(crops) >= WRIST_CROP_MAX_CROPS:
                 break
         if (WRIST_HANDS_CROP and s["l_wrist"] is not None and s["r_wrist"] is not None
@@ -507,13 +692,18 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
                              gap * 0.75))
                 x1, y1 = max(0, mx - hh), max(0, my - hh)
                 x2, y2 = min(w, mx + hh), min(h, my + hh)
-                if x2 - x1 >= 16 and y2 - y1 >= 16:
+                if (x2 - x1 >= 16 and y2 - y1 >= 16
+                        and not _wrist_can_rest(entry, (tid, "H"), (mx, my),
+                                               s["shoulder_width"], now)):
                     crops.append(frame[y1:y2, x1:x2].copy())
                     meta.append((tid, x1, y1, (mx, my), s["shoulder_width"]))
+                    rest_keys.append(((tid, "H"), (mx, my), s["shoulder_width"]))
         if len(crops) >= WRIST_CROP_MAX_CROPS:
             break
     if not crops:
+        entry["_wc_debug"] = []   # nothing checked this pass: no stale debug boxes
         return
+    entry["_wc_ncrops"] = len(crops)
 
     results = _run_wrist_model(entry, crops)
     entry["_wc_debug"] = [
@@ -522,19 +712,21 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
         for (tid, ox, oy, _wpt, _sw), c, r in zip(meta, crops, results)
     ]
 
+    # remember which wrists came back empty (see _wrist_can_rest)
+    for (key, pos, _sw), r in zip(rest_keys, results):
+        entry.setdefault("_wc_rest", {})[key] = {"pos": pos, "empty": len(r.boxes) == 0, "t": now}
     best = {}   # track_id -> strongest phone detection this pass (full-frame coords)
+    pv_by_tid = {}   # r47: track_id -> (conf, Stage-2 verdict) of its strongest candidate
     _stu = {s["track_id"]: s for s in students}
     for (tid, ox, oy, wpt, sw), r in zip(meta, results):
         for box in r.boxes:
             conf = float(box.conf[0])
-            cls_id = int(box.cls[0])
-            need = WRIST_CROP_REMOTE_CONF if cls_id == 65 else WRIST_CROP_CONF
             weak = False
-            if conf < need:
+            if conf < WRIST_CROP_CONF:
                 if conf >= WRIST_WEAK_CONF and _hands_at_chest(_stu.get(tid)):
                     weak = True    # faint, but both hands are up at chest height
                 else:
-                    continue   # below the real threshold (inference runs at 0.10 for the debug overlay)
+                    continue   # below the real threshold
             bx1, by1, bx2, by2 = map(int, box.xyxy[0])
             ccx, ccy = ox + (bx1 + bx2) // 2, oy + (by1 + by2) // 2
             full_box = (ox + bx1, oy + by1, ox + bx2, oy + by2)
@@ -542,18 +734,26 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
             if math.hypot(ccx - wpt[0], ccy - wpt[1]) > WRIST_CROP_MAX_WRIST_DIST * sw:
                 rej.append(full_box + ("FAR FROM HAND",))
                 continue   # too far from the hand to be held in it (furniture at the crop edge)
-            if _pen_like((bx1, by1, bx2, by2), sw, conf):
+            if PHONE_VERIFY != "off":
+                _pvr = _pv.store_for(entry, PHONE_VERIFY_DUMP_DIR if PHONE_VERIFY_DUMP else None,
+                                     camera_id).feed(frame, full_box, conf, now, owner=tid)
+                if tid not in pv_by_tid or conf > pv_by_tid[tid][0]:
+                    pv_by_tid[tid] = (conf, _pvr)
+            if PHONE_VERIFY != "on" and _pen_like((bx1, by1, bx2, by2), sw, conf):
                 rej.append(full_box + ("PEN-LIKE",))
                 continue   # long thin box: a pen, not a phone
-            if _badge_like((ccx, ccy), students, frame, full_box):
+            if PHONE_VERIFY != "on" and _badge_like((ccx, ccy), students, frame, full_box):
                 rej.append(full_box + ("ID BADGE",))
                 continue   # ID badge on a lanyard, not a phone
-            if tid in _stu:
+            if tid in _stu and PHONE_VERIFY != "on":
                 verdict = _torso_lock_verdict(entry, _stu[tid], (ccx, ccy), now)
                 if verdict != "phone":
                     rej.append(full_box + (("ID BADGE (moves with body)" if verdict == "badge"
                                             else "CHECKING..."),))
                     continue
+            if not _hand_rise_ok(entry, tid, now):
+                rej.append(full_box + ("NO HAND RISE",))
+                continue   # hand never came up from below: not a phone pulled out
             if tid not in best or conf > best[tid]["confidence"]:
                 best[tid] = {
                     "name":       "CELL PHONE",
@@ -574,11 +774,13 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
         recent = [t for t in store.get(tid, []) if now - t <= window]
         recent.append(now)
         store[tid] = recent
-        if len(recent) >= need_hits:
+        if len(recent) >= need_hits and (PHONE_VERIFY != "on" or
+                                         pv_by_tid.get(tid, (0, {}))[1].get("verdict") == "CONFIRMED"):
             if tid not in confirmed:
                 print(f"[{camera_id}] ID {tid}: phone in hand (wrist crop, "
                       f"{det['confidence']*100:.0f}%)")
             confirmed[tid] = {"det": det, "until": now + WRIST_CROP_HOLD_SEC}
+            entry.setdefault("_phone_ok", {})[tid] = now
 
     for tid in list(hits):
         if tid not in best:
@@ -597,7 +799,13 @@ def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_det
         confirmed = entry.setdefault("_wc_confirmed", {})
         if now - entry.get("_wc_last", 0.0) >= WRIST_CROP_INTERVAL_SEC:
             entry["_wc_last"] = now
+            _t0 = time.perf_counter()
             _wrist_crop_sample(entry, camera_id, clean_frame, students, now)
+            _n = entry["_wc_n"] = entry.get("_wc_n", 0) + 1
+            entry["_wc_sum"] = entry.get("_wc_sum", 0.0) + (time.perf_counter() - _t0)
+            if _n % 20 == 0:
+                print(f"[{camera_id}] wrist pass: {entry['_wc_sum'] / _n * 1000:.0f} ms avg, "
+                      f"{entry.get('_wc_ncrops', 0)} crops last pass")
 
         for tid in [t for t, c in confirmed.items() if c["until"] < now]:
             del confirmed[tid]
@@ -664,6 +872,8 @@ def _pen_like(bbox, ref_sw, conf=None):
     if ref_sw is not None:
         if short_side < PHONE_MIN_SHORT_SW * ref_sw:
             return True
+        if long_side > PHONE_MAX_LONG_SW * ref_sw:
+            return True   # person-sized box, not a phone
         if long_side < PHONE_TINY_SW * ref_sw:
             return True
         if (conf is not None and long_side < PHONE_SMALL_SW * ref_sw
@@ -739,6 +949,12 @@ def _badge_like(center, students, frame=None, bbox=None):
             continue
         if card_like:
             return True    # white ID-card look in the chest strip: a badge, even with a hand on it
+        # r41 two-hand: both hands round it = phone, regardless of any lanyard
+        _both = [wr for wr in (s["l_wrist"], s["r_wrist"])
+                 if wr is not None
+                 and math.hypot(cx - wr[0], cy - wr[1]) < BADGE_TWO_HAND_MULT * sw]
+        if len(_both) == 2:
+            return False
         strap = _lanyard_above(frame, bbox, s)
         hand_limit = BADGE_HAND_HOLD_MULT * sw
         for wr in (s["l_wrist"], s["r_wrist"]):
@@ -812,10 +1028,14 @@ def _torso_lock_verdict(entry, s, center, now):
     wrists = [wr for wr in (s["l_wrist"], s["r_wrist"]) if wr is not None]
     if not wrists:
         return "phone"
+    # r41 two-hand: both hands wrapped round the candidate = phone, never a badge
+    if sum(1 for p in wrists
+           if math.hypot(cx - p[0], cy - p[1]) < BADGE_TWO_HAND_MULT * sw) == 2:
+        return "phone"
     wr = min(wrists, key=lambda p: math.hypot(cx - p[0], cy - p[1]))
 
     hist = entry.setdefault("_badge_hist", {}).setdefault(s["track_id"], [])
-    if hist and now - hist[-1][0] > 1.0:
+    if hist and now - hist[-1][0] > 2.5:
         hist.clear()                                   # candidate vanished: start over
     if not hist or now - hist[-1][0] >= 0.05:          # one sample per pass/frame
         hist.append((now,
@@ -832,6 +1052,36 @@ def _torso_lock_verdict(entry, s, center, now):
     if std_r < BADGE_LOCK_STD and std_d > max(BADGE_LOCK_MIN_REL, BADGE_LOCK_RATIO * std_r):
         return "badge"
     return "phone"
+
+
+def _update_hand_rise(entry, students, now):
+    """r48: remember when each student's hand was last low or out of sight."""
+    if not PHONE_NEEDS_HAND_RISE:
+        return
+    st = entry.setdefault("_hand_low", {})
+    for s in students:
+        sw = s["shoulder_width"]
+        sy = s["shoulder_center"][1]
+        low = any(w is None or (w[1] - sy) >= HAND_LOW_SW * sw
+                  for w in (s["l_wrist"], s["r_wrist"]))
+        d = st.setdefault(s["track_id"], {"since": None, "last": -1e9})
+        if low:
+            if d["since"] is None:
+                d["since"] = now
+            if now - d["since"] >= HAND_LOW_MIN_SEC:
+                d["last"] = now
+        else:
+            d["since"] = None
+
+
+def _hand_rise_ok(entry, tid, now):
+    """r48: True if this student's phone is allowed to count right now."""
+    if not PHONE_NEEDS_HAND_RISE:
+        return True
+    if now - entry.get("_phone_ok", {}).get(tid, -1e9) <= HAND_RISE_KEEP_SEC:
+        return True
+    d = entry.get("_hand_low", {}).get(tid)
+    return d is not None and now - d["last"] <= HAND_RISE_MEMORY_SEC
 
 
 def make_status_frame(label, message, sub_message=""):
@@ -1033,9 +1283,9 @@ def _detection_loop(camera_id):
                     with entry["lock"]:
                         if entry["cap"] is not None:
                             entry["cap"].release()
-                        new_cap = cv2.VideoCapture(entry["source"])
-                        new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        new_cap = _open_capture(entry["source"], entry["type"])
                         entry["cap"] = new_cap
+                        entry["_overlay"] = None
                     placeholder = make_status_frame(
                         entry["label"], "DISCONNECTED", "Attempting to reconnect...")
                     ret, buf = cv2.imencode('.jpg', placeholder)
@@ -1100,15 +1350,32 @@ def _detection_loop(camera_id):
             # 1. PROHIBITED OBJECT DETECTION (YOLO)
             # ==========================================
             object_detections = []
+            entry["_obj_n"] = entry.get("_obj_n", 0) + 1
+            _obj_cache = entry.get("_obj_cache")
+            _run_full_pass = (_obj_cache is None or not DETECTION_ENABLED["phone"]
+                              or entry["_obj_n"] % max(1, PHONE_FULL_EVERY_N) == 0)
+            if not _run_full_pass:
+                # skipped frame: reuse the last result (as copies, later steps edit these dicts)
+                object_detections = [dict(d) for d in _obj_cache]
             try:
-                obj_results = entry["object_model"](frame, stream=True, verbose=False, classes=[67], imgsz=960)
+                obj_results = (entry["object_model"](frame, stream=True, verbose=False, classes=[0],
+                                                     imgsz=640, device=DEVICE, half=USE_HALF)
+                               if (DETECTION_ENABLED["phone"] and _run_full_pass) else [])
                 for r in obj_results:
                     for box in r.boxes:
                         cls_id     = int(box.cls[0])
                         confidence = float(box.conf[0])
-                        if (cls_id in PROHIBITED_CLASSES and confidence > 0.45
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        bw, bh = x2 - x1, y2 - y1
+
+                        # --- ANTI-HUMAN SANITY FILTER ---
+                        if bh > h * 0.35 or bw > w * 0.35:
+                            continue  # Ignore human torsos
+                        if (bw * bh) > (w * h * 0.08):
+                            continue
+
+                        if (cls_id in PROHIBITED_CLASSES and confidence > PHONE_FULL_CONF
                                 and DETECTION_ENABLED["phone"]):
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
                             object_detections.append({
                                 "name":       PROHIBITED_CLASSES[cls_id],
                                 "confidence": confidence,
@@ -1117,6 +1384,8 @@ def _detection_loop(camera_id):
                             })
             except Exception as e:
                 print(f"[{camera_id}] Object detection error: {e}")
+            if _run_full_pass:
+                entry["_obj_cache"] = [dict(d) for d in object_detections]
 
             # ==========================================
             # 2. SKELETAL POSE ESTIMATION + TRACKING
@@ -1134,6 +1403,8 @@ def _detection_loop(camera_id):
                     iou=POSE_IOU,
                     imgsz=POSE_IMGSZ,
                     conf=POSE_CONF,
+                    device=DEVICE,
+                    half=USE_HALF,
                 )
 
                 for r in pose_results:
@@ -1318,9 +1589,14 @@ def _detection_loop(camera_id):
                                                              if track_id in gaze_timers
                                                              else PITCH_DOWN_DELTA)
 
-                                if smoothed_ratio < -HEAD_TURN_RATIO_THRESHOLD:
+                                _prev = entry.get("last_turn", {}).get(track_id)
+                                _l_thr = (HEAD_TURN_EXIT_RATIO if _prev == "LOOKING LEFT"
+                                          else HEAD_TURN_RATIO_THRESHOLD)
+                                _r_thr = (HEAD_TURN_EXIT_RATIO if _prev == "LOOKING RIGHT"
+                                          else HEAD_TURN_RATIO_THRESHOLD)
+                                if smoothed_ratio < -_l_thr:
                                     person_turn = "LOOKING LEFT"
-                                elif smoothed_ratio > HEAD_TURN_RATIO_THRESHOLD:
+                                elif smoothed_ratio > _r_thr:
                                     person_turn = "LOOKING RIGHT"
 
                                 if (person_turn != "FORWARD" and looking_down
@@ -1460,14 +1736,22 @@ def _detection_loop(camera_id):
                 for key in ("last_turn", "_gaze_logged", "_nb_seen", "_nb_dbg"):
                     entry.get(key, {}).pop(tid, None)
 
+            _update_hand_rise(entry, students, current_time)
+            if DEBUG_OVERLAY and PHONE_NEEDS_HAND_RISE:
+                for _s in students:
+                    _ok = _hand_rise_ok(entry, _s["track_id"], current_time)
+                    cv2.putText(frame, "rise" if _ok else "no-rise",
+                                (_s["shoulder_center"][0] - 45, _s["shoulder_center"][1] + 56),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                                (0, 255, 0) if _ok else (150, 150, 150), 1)
             _merge_wrist_phones(entry, camera_id, clean_frame, students,
                                 current_time, object_detections)
             if DEBUG_OVERLAY:
                 for (dx1, dy1, dx2, dy2, dtid, dtop) in entry.get("_wc_debug", []):
                     cv2.rectangle(frame, (dx1, dy1), (dx2, dy2), (255, 0, 255), 1)
-                    cv2.putText(frame, f"{dtop[0]:.2f}" + (" remote" if dtop[1] == 65 else ""),
-                            (dx1, max(dy1 - 3, 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+                    cv2.putText(frame, f"{dtop[0]:.2f}",
+                        (dx1, max(dy1 - 3, 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
             if DEBUG_OVERLAY:
                 for (rx1, ry1, rx2, ry2, why) in entry.get("_wc_rej", []):
@@ -1475,6 +1759,11 @@ def _detection_loop(camera_id):
                     cv2.putText(frame, why, (rx1, max(ry1 - 4, 10)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
 
+            if DEBUG_OVERLAY and PHONE_VERIFY != "off" and entry.get("_pv") is not None:
+                for (px1, py1, px2, py2, plabel, pcolor) in entry["_pv"].overlay(current_time):
+                    cv2.rectangle(frame, (px1, py1), (px2, py2), pcolor, 1)
+                    cv2.putText(frame, plabel, (px1, min(h - 4, py2 + 14)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, pcolor, 1)
             established_ids = {tid for tid, seen in track_first_seen.items()
                                if current_time - seen >= TRACK_MIN_AGE_SEC}
 
@@ -1511,20 +1800,37 @@ def _detection_loop(camera_id):
             for i, det in enumerate(object_detections):
                 x1, y1, x2, y2 = det["bbox"]
                 # wrist-crop detections (they carry a track_id) were already vetted
-                if det.get("track_id") is None and _pen_like(
+                if PHONE_VERIFY != "off" and det.get("track_id") is None:
+                    _pvr = _pv.store_for(entry, PHONE_VERIFY_DUMP_DIR if PHONE_VERIFY_DUMP else None,
+                                         camera_id).feed(clean_frame, det["bbox"],
+                                                         det["confidence"], current_time)
+                    if PHONE_VERIFY == "on" and _pvr["verdict"] != "CONFIRMED":
+                        if DEBUG_OVERLAY:
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
+                            cv2.putText(frame, "UNVERIFIED (" + _pvr["verdict"].lower() + ")",
+                                        (x1, max(y1 - 8, 12)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+                        continue
+                if PHONE_VERIFY != "on" and det.get("track_id") is None and _pen_like(
                         det["bbox"], _local_sw(det, students, ref_sw), det["confidence"]):
                     if DEBUG_OVERLAY:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
                         cv2.putText(frame, "PEN-LIKE (ignored)", (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
                     continue
-                if det.get("track_id") is None and _badge_like(det["center"], students, clean_frame, det["bbox"]):
+                if (PHONE_FULL_NEEDS_HAND and det.get("track_id") is None and not _phone_in_hand(det, students)):
+                    if DEBUG_OVERLAY:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
+                        cv2.putText(frame, "NOT IN HAND (ignored)", (x1, max(y1 - 8, 12)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+                    continue
+                if PHONE_VERIFY != "on" and det.get("track_id") is None and _badge_like(det["center"], students, clean_frame, det["bbox"]):
                     if DEBUG_OVERLAY:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
                         cv2.putText(frame, "ID BADGE (ignored)", (x1, max(y1 - 8, 12)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
                     continue
-                if det.get("track_id") is None:
+                if PHONE_VERIFY != "on" and det.get("track_id") is None:
                     _own = _owner_of_detection(det, students, established_ids)
                     _os = next((s for s in students if s["track_id"] == _own), None)
                     if _os is not None:
@@ -1537,6 +1843,16 @@ def _detection_loop(camera_id):
                                             (x1, max(y1 - 8, 12)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 200, 255), 1)
                             continue
+                if det.get("track_id") is None and PHONE_NEEDS_HAND_RISE:
+                    _ro = _owner_of_detection(det, students, established_ids)
+                    if _ro is not None:
+                        if not _hand_rise_ok(entry, _ro, current_time):
+                            if DEBUG_OVERLAY:
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (90, 90, 90), 1)
+                                cv2.putText(frame, "NO HAND RISE (ignored)", (x1, max(y1 - 8, 12)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1)
+                            continue
+                        entry.setdefault("_phone_ok", {})[_ro] = current_time
                 if i in static_phone_idx and not _phone_in_hand(det, students):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
                     cv2.putText(frame, "STATIC OBJECT (suppressed)", (x1, max(y1 - 8, 12)),
@@ -1723,9 +2039,14 @@ def _detection_loop(camera_id):
                         print(f"[{camera_id}] NEW INCIDENT {v_reason} "
                               f"(track_id={v_tid}, t={inc['start']:.1f}s)")
 
-            ret, buf = cv2.imencode('.jpg', frame)
-            if ret:
-                entry["latest_frame"] = buf.tobytes()
+            if entry.get("_smooth_display"):
+                # hand the pixels we drew to the display thread; it pastes them on live video
+                entry["_overlay"] = {"mask": np.any(frame != clean_frame, axis=2),
+                                     "frame": frame, "t": time.time()}
+            else:
+                ret, buf = cv2.imencode('.jpg', frame)
+                if ret:
+                    entry["latest_frame"] = buf.tobytes()
 
     finally:
         _finish_recording(entry)
@@ -2510,4 +2831,3 @@ atexit.register(_shutdown)
 if __name__ == '__main__':
     app.run(debug=False, threaded=True,
             host=os.environ.get("CERBERUS_HOST", "127.0.0.1"), port=5000)
-
