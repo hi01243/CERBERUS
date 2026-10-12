@@ -70,14 +70,14 @@ WRIST_CROP_ENABLED      = True
 WRIST_CROP_SCALE        = 1.6    # crop width = this x the student's shoulder width
 WRIST_CROP_MIN_HALF_PX  = 32     # never crop smaller than 64 px across
 WRIST_CROP_IMGSZ        = 640    # crops are upscaled to this before inference
-WRIST_CROP_CONF         = 0.80  # lower than the full-frame 0.45; persistence compensates
+WRIST_CROP_CONF         = 0.78  # lower than the full-frame 0.45; persistence compensates
 WRIST_CROP_INTERVAL_SEC = 0.33   # run ~3x per second, not every frame
 WRIST_CROP_MAX_CROPS    = 40     # cap per pass (large rooms: raise on a GPU)
-WRIST_CROP_MIN_HITS     = 3      # hits needed ...
+WRIST_CROP_MIN_HITS     = 2      # hits needed ...
 WRIST_CROP_WINDOW_SEC   = 2.0    # ... inside this window
 WRIST_CROP_HOLD_SEC     = 0.8    # keep a confirmed phone alive between passes
 WRIST_CROP_DEDUP_PX     = 50     # same phone as a full-frame detection if this close
-WRIST_CROP_MODEL        = "best.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
+WRIST_CROP_MODEL        = "best_tuned.pt"  # bigger model for the zoomed-in pass only; "yolo11n.pt" = old/faster
 PHONE_MODEL = WRIST_CROP_MODEL   # full-frame pass uses the same trained phone model -> only 2 models load (set "yolo11n.pt" to go back)
 WRIST_CROP_CLASSES      = [0]   # class 0 = cell phone in the trained model
 
@@ -91,11 +91,11 @@ PHONE_FULL_EVERY_N = 2   # full-frame phone pass runs on every Nth frame (1 = ev
 PHONE_VERIFY = "off"
 PHONE_VERIFY_DUMP = True             # True: save candidate crops for calibration (python phone_verify.py --probe)
 PHONE_VERIFY_DUMP_DIR = "phone_candidates"
-PHONE_FULL_CONF = 0.80        # full-frame phone pass: confidence needed (was 0.45)
+PHONE_FULL_CONF = 0.80         # full-frame phone pass: confidence needed (was 0.45)
 # --- HAND-RISE CONDITION (r48) ---
 # A phone only counts if the student's hand was recently down low or out of sight
 # (pocket / lap / bag), i.e. it "came from somewhere". Set False to switch off.
-PHONE_NEEDS_HAND_RISE = True
+PHONE_NEEDS_HAND_RISE = False
 HAND_LOW_SW           = 1.0    # wrist this far below the shoulder line (x shoulder width) = "low"
 HAND_LOW_MIN_SEC      = 0.3    # must stay low / out of sight this long to count
 HAND_RISE_MEMORY_SEC  = 10.0   # a phone may appear this long after the hand was low
@@ -234,7 +234,7 @@ BADGE_LOCK_RATIO      = 3.0    # ... and be this many times the shoulder-offset 
 GAZE_DOWN_HYSTERESIS  = 2.5    # while a gaze timer runs, head-drop needed for 'down' is this x PITCH_DOWN_DELTA
 
 # --- r37: wrist-crop phone pass ---
-WRIST_CROP_FLOOR_CONF = 0.35   # inference floor (the real thresholds are applied afterwards)
+WRIST_CROP_FLOOR_CONF = 0.50    # inference floor (the real thresholds are applied afterwards)
 WRIST_CROP_AUGMENT    = False   # test-time augmentation (flip/scales); auto-disables if unsupported
 
 # If flagged this long it's a held posture (leaning to write); re-baseline silently.
