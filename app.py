@@ -81,6 +81,30 @@ WRIST_CROP_MODEL        = "best_tuned.pt"  # bigger model for the zoomed-in pass
 PHONE_MODEL = WRIST_CROP_MODEL   # full-frame pass uses the same trained phone model -> only 2 models load (set "yolo11n.pt" to go back)
 WRIST_CROP_CLASSES      = [0]   # class 0 = cell phone in the trained model
 
+# --- DESK-CROP PHONE PASS (r49) ---
+# Extra zoomed crop on the desk / lap area of a student who is looking down.
+# Needed for phones held low that the wrist crops do not see well.
+DESK_CROP_ENABLED        = True    # False = switch the whole feature off
+DESK_REQUIRE_LOOKDOWN    = True    # only check students whose head is down
+DESK_LOOKDOWN_MAX_RISE_SW = 0.5    # nose less than this x shoulder width above the shoulder line = head down
+DESK_HALF_W_SW           = 1.1     # crop half-width, x shoulder width, around the shoulder centre
+DESK_TOP_SW              = 0.8     # crop starts this far BELOW the shoulder line (x shoulder width)
+DESK_BOTTOM_SW           = 2.2     # ... and ends this far below it
+DESK_MAX_CROPS           = 20
+DESK_IMGSZ               = 640
+DESK_FLOOR_CONF          = 0.30    # model inference floor for desk crops
+DESK_CROP_CONF           = 0.50    # a desk detection must reach this to count as a hit
+DESK_MIN_HITS            = 2       # hits needed ...
+DESK_WINDOW_SEC          = 2.0     # ... inside this window
+DESK_HOLD_SEC            = 0.8     # keep a confirmed phone alive between passes
+DESK_MAX_MEAN_GRAY       = 185     # brighter than this = white paper, not a phone
+DESK_DARK_PIXEL          = 75      # gray value below this = "dark" pixel
+DESK_MIN_DARK_FRAC       = 0.16    # a phone box needs at least this share of dark pixels
+DESK_MIN_SHORT_SW        = 0.18    # desk phone box: short side at least this x shoulder width
+DESK_MIN_LONG_SW         = 0.40    # ... and long side at least this x shoulder width
+DESK_MAX_HAND_SW         = 0.7     # desk phone centre must be within this x shoulder width of a wrist
+
+
 # --- PHONE FRAME SKIP (r46) ---
 PHONE_FULL_EVERY_N = 2   # full-frame phone pass runs on every Nth frame (1 = every frame)
 
@@ -789,6 +813,114 @@ def _wrist_crop_sample(entry, camera_id, frame, students, now):
                 del hits[tid]
 
 
+def _desk_looking_down(s):
+    """r49: True if the student's head is down (nose close to the shoulder line)."""
+    if not DESK_REQUIRE_LOOKDOWN:
+        return True
+    try:
+        nose = s.get("nose")
+        if nose is None or float(nose[0]) <= 0:
+            return True    # nose not visible: assume head down (a hidden face is usually a bowed head)
+        rise = (s["shoulder_center"][1] - float(nose[1])) / float(s["shoulder_width"])
+        return rise < DESK_LOOKDOWN_MAX_RISE_SW
+    except Exception:
+        return True
+
+
+def _desk_patch_ok(patch):
+    """r49: rejects white paper and bare skin: a phone box needs dark pixels."""
+    if patch is None or patch.size == 0:
+        return False
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    if float(np.mean(gray)) > DESK_MAX_MEAN_GRAY:
+        return False
+    return np.count_nonzero(gray < DESK_DARK_PIXEL) / float(gray.size) >= DESK_MIN_DARK_FRAC
+
+
+def _desk_crop_sample(entry, camera_id, frame, students, now):
+    """r49: one zoomed pass over the desk / lap area of every student who is looking down.
+    Confirmed phones are written into entry['_wc_confirmed'], the same place the
+    wrist-crop pass uses, so the rest of the pipeline treats them the same way."""
+    h, w = frame.shape[:2]
+    crops, meta = [], []
+    for s in students:
+        tid = s["track_id"]
+        if now - entry["track_first_seen"].get(tid, now) < TRACK_MIN_AGE_SEC:
+            continue
+        if s.get("person_turn") == "CALIBRATING" or not _desk_looking_down(s):
+            continue
+        sx, sy = s["shoulder_center"]
+        sw = s["shoulder_width"]
+        x1, x2 = max(0, int(sx - DESK_HALF_W_SW * sw)), min(w, int(sx + DESK_HALF_W_SW * sw))
+        y1, y2 = max(0, int(sy + DESK_TOP_SW * sw)), min(h, int(sy + DESK_BOTTOM_SW * sw))
+        if x2 - x1 < 24 or y2 - y1 < 24:
+            continue
+        crops.append(frame[y1:y2, x1:x2].copy())
+        meta.append((tid, x1, y1, sw, s))
+        if len(crops) >= DESK_MAX_CROPS:
+            break
+    entry["_desk_ncrops"] = len(crops)
+    if not crops:
+        return
+
+    results = _wrist_model(entry)(crops, imgsz=DESK_IMGSZ, conf=DESK_FLOOR_CONF,
+                                  classes=WRIST_CROP_CLASSES, verbose=False,
+                                  device=DEVICE, half=USE_HALF)
+    rej = entry.setdefault("_wc_rej", [])
+    best = {}
+    for (tid, ox, oy, sw, s), crop, r in zip(meta, crops, results):
+        for box in r.boxes:
+            conf = float(box.conf[0])
+            if conf < DESK_CROP_CONF:
+                continue
+            bx1, by1, bx2, by2 = map(int, box.xyxy[0])
+            full_box = (ox + bx1, oy + by1, ox + bx2, oy + by2)
+            ccx, ccy = (full_box[0] + full_box[2]) // 2, (full_box[1] + full_box[3]) // 2
+            hands = [wr for wr in (s["l_wrist"], s["r_wrist"]) if wr is not None]
+            _hd = min((math.hypot(ccx - wr[0], ccy - wr[1]) for wr in hands), default=1e9) / float(sw)
+            if _hd > DESK_MAX_HAND_SW:
+                rej.append(full_box + (f"DESK: FAR FROM HAND ({_hd:.1f} sw)",))
+                continue
+            _bw, _bh = bx2 - bx1, by2 - by1
+            if min(_bw, _bh) < DESK_MIN_SHORT_SW * sw or max(_bw, _bh) < DESK_MIN_LONG_SW * sw:
+                rej.append(full_box + (f"DESK: TOO SMALL ({max(_bw, _bh) / sw:.2f} x {min(_bw, _bh) / sw:.2f} sw)",))
+                continue
+            if _pen_like((bx1, by1, bx2, by2), sw, conf):
+                rej.append(full_box + ("DESK: PEN-LIKE",))
+                continue
+            if _badge_like((ccx, ccy), students, frame, full_box):
+                rej.append(full_box + ("DESK: ID BADGE",))
+                continue
+            _verdict = _torso_lock_verdict(entry, s, (ccx, ccy), now)
+            if _verdict != "phone":
+                rej.append(full_box + (("DESK: ID BADGE (moves with body)" if _verdict == "badge"
+                                       else "DESK: CHECKING..."),))
+                continue
+            if not _desk_patch_ok(crop[by1:by2, bx1:bx2]):
+                rej.append(full_box + ("DESK: NOT PHONE-LIKE",))
+                continue
+            if tid not in best or conf > best[tid]["confidence"]:
+                best[tid] = {"name": "CELL PHONE", "confidence": conf,
+                             "center": (ccx, ccy), "bbox": full_box, "weak": False, "hand_sw": _hd}
+
+    hits = entry.setdefault("_desk_hits", {})
+    confirmed = entry.setdefault("_wc_confirmed", {})
+    for tid, det in best.items():
+        recent = [t for t in hits.get(tid, []) if now - t <= DESK_WINDOW_SEC]
+        recent.append(now)
+        hits[tid] = recent
+        if len(recent) >= DESK_MIN_HITS:
+            if tid not in confirmed:
+                print(f"[{camera_id}] ID {tid}: phone at desk (desk crop, "
+                      f"{det['confidence']*100:.0f}%, hand {det.get('hand_sw', 0):.2f} sw)")
+            confirmed[tid] = {"det": det, "until": now + DESK_HOLD_SEC}
+    for tid in list(hits):
+        if tid not in best:
+            hits[tid] = [t for t in hits[tid] if now - t <= DESK_WINDOW_SEC]
+            if not hits[tid]:
+                del hits[tid]
+
+
 def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_detections):
     """Adds confirmed wrist-crop phones to `object_detections` (in place).
     Never raises: a failure here must not stop the detection loop."""
@@ -801,6 +933,8 @@ def _merge_wrist_phones(entry, camera_id, clean_frame, students, now, object_det
             entry["_wc_last"] = now
             _t0 = time.perf_counter()
             _wrist_crop_sample(entry, camera_id, clean_frame, students, now)
+            if DESK_CROP_ENABLED:
+                _desk_crop_sample(entry, camera_id, clean_frame, students, now)
             _n = entry["_wc_n"] = entry.get("_wc_n", 0) + 1
             entry["_wc_sum"] = entry.get("_wc_sum", 0.0) + (time.perf_counter() - _t0)
             if _n % 20 == 0:
