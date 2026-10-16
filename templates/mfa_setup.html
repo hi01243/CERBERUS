@@ -19,14 +19,16 @@
   .secondary { border-color:var(--line); background:transparent; color:var(--text); }
   .error { color:var(--error); }
   a.back { display:block; margin-top:18px; color:var(--accent); text-decoration:none; }
+  a.codes { display:block; margin-top:12px; color:var(--accent); text-decoration:none; }
 </style>
 </head>
 <body>
 <main>
   <h1>Authenticator sign-in</h1>
   {% if enabled %}
-    <p>Authenticator MFA is enabled. Sign in with your username, password, and an app code.</p>
+    <p>Authenticator MFA is enabled. Sign in with your username, password, and an app code or unused recovery code.</p>
     <button id="disable-mfa" class="secondary" type="button">Disable authenticator MFA</button>
+    <a class="codes" href="/security/recovery-codes">Manage recovery codes</a>
   {% else %}
     <p>Add CERBERUS to an authenticator app using this setup key, then enter the current six-digit code to enable sign-in MFA.</p>
     <code class="secret">{{ secret }}</code>
@@ -43,7 +45,7 @@
 <script>
 document.getElementById('disable-mfa').addEventListener('click', async () => {
   const button = document.getElementById('disable-mfa');
-  const code = prompt('Enter the current six-digit code from your authenticator app:');
+  const code = prompt('Enter a current authenticator code or an unused recovery code:');
   if (!code) return;
   button.disabled = true;
   try {

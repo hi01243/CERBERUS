@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERBERUS - Recovery codes</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; background-color:var(--cerb-bg); background-image:linear-gradient(rgba(135,184,154,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(135,184,154,.035) 1px,transparent 1px); background-size:36px 36px; color:var(--cerb-text); font:14px/1.5 var(--cerb-font); }
+  main { width:min(500px,100%); padding:30px; border:1px solid var(--cerb-line); border-radius:7px; background:var(--cerb-surface); box-shadow:0 22px 70px rgba(0,0,0,.24); }
+  h1 { margin:0 0 8px; font-size:18px; }
+  p { color:var(--cerb-muted); font-size:12px; }
+  label { display:block; margin:18px 0 6px; color:var(--cerb-muted); font-size:12px; }
+  input { box-sizing:border-box; width:100%; padding:10px 11px; border:1px solid var(--cerb-line); border-radius:4px; background:var(--cerb-bg); color:var(--cerb-text); font:inherit; }
+  button,.link { display:inline-flex; align-items:center; justify-content:center; min-height:40px; margin-top:14px; padding:9px 14px; border:1px solid var(--cerb-green); border-radius:4px; background:var(--cerb-green); color:var(--cerb-green-ink); font:700 13px var(--cerb-font); text-decoration:none; cursor:pointer; }
+  .codes { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin:18px 0; padding:0; list-style:none; }
+  .codes li { padding:10px; border:1px solid var(--cerb-line); border-radius:4px; background:var(--cerb-bg); color:var(--cerb-amber); font:13px var(--cerb-mono); text-align:center; }
+  .warning { color:var(--cerb-amber); }
+  .error { color:var(--cerb-red); }
+  @media(max-width:420px) { main { padding:22px; } .codes { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Account recovery codes</h1>
+  {% if recovery_codes %}
+    <p class="warning">Save these codes somewhere private. Each code works once, and CERBERUS cannot show them again.</p>
+    <ul class="codes">
+      {% for code in recovery_codes %}<li>{{ code }}</li>{% endfor %}
+    </ul>
+    <p>Use a recovery code to reset your password, or enter one instead of an authenticator code at sign-in. Generating new codes invalidates these.</p>
+    <a class="link" href="{{ next_url }}">Continue</a>
+  {% else %}
+    <p>Generate ten one-time codes to recover your account if you lose your password or authenticator. This replaces any previous recovery codes.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post">
+      <label for="password">Current password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required autofocus>
+      <button type="submit">Generate recovery codes</button>
+    </form>
+    <p><a href="{{ next_url }}">Back to sessions</a></p>
+  {% endif %}
+</main>
+</body>
+</html>

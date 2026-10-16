@@ -9,8 +9,11 @@ from contextlib import closing
 import cv2
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RECORDINGS_FOLDER = os.path.join(BASE_DIR, "recordings")
-INCIDENT_DB = os.path.join(BASE_DIR, "incidents.db")
+DATA_DIR = os.environ.get("CERBERUS_DATA_DIR")
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+RECORDINGS_FOLDER = os.path.join(DATA_DIR, "recordings") if DATA_DIR else os.path.join(BASE_DIR, "recordings")
+INCIDENT_DB = os.path.join(DATA_DIR, "incidents.db") if DATA_DIR else os.path.join(BASE_DIR, "incidents.db")
 
 RECORD_FPS = 10.0             # fixed output fps (real time is preserved by duplicating frames)
 RECORD_MAX_WIDTH = 960        # wider frames are downscaled to keep files small

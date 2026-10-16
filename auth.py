@@ -13,7 +13,10 @@ from contextlib import closing
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AUTH_DB = os.path.join(BASE_DIR, "users.db")
+DATA_DIR = os.environ.get("CERBERUS_DATA_DIR")
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+AUTH_DB = os.path.join(DATA_DIR, "users.db") if DATA_DIR else os.path.join(BASE_DIR, "users.db")
 
 MIN_PASSWORD_LEN = 8
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_.-]{3,32}$')
@@ -50,6 +53,12 @@ def init_auth_db():
     except sqlite3.OperationalError:
         pass
     _q("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE)")
+    _q("""CREATE TABLE IF NOT EXISTS recovery_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    _q("CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON recovery_codes(user_id)")
     _init_session_owners()
 
 
@@ -118,6 +127,85 @@ def verify_user(username, password):
     return user if check_password_hash(user["password_hash"], password or "") else None
 
 
+def _normalized_recovery_code(code):
+    normalized = re.sub(r"[\s-]", "", str(code or "")).upper()
+    return normalized if re.fullmatch(r"[A-Z2-7]{16}", normalized) else None
+
+
+def _recovery_code_hash(code):
+    return hashlib.sha256(code.encode("ascii")).hexdigest()
+
+
+def generate_recovery_codes(user_id):
+    """Replace a user's recovery codes and return the plaintext codes once."""
+    codes = [
+        base64.b32encode(secrets.token_bytes(10)).decode("ascii").rstrip("=")
+        for _ in range(10)
+    ]
+    with closing(sqlite3.connect(AUTH_DB, timeout=10)) as con:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
+        con.executemany(
+            "INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)",
+            [(user_id, _recovery_code_hash(code)) for code in codes],
+        )
+        con.commit()
+    return [f"{code[:4]}-{code[4:8]}-{code[8:12]}-{code[12:]}" for code in codes]
+
+
+def verify_recovery_code(user_id, code):
+    """Consume a valid recovery code for an account's second-factor sign-in."""
+    normalized = _normalized_recovery_code(code)
+    if not normalized:
+        return False
+    code_hash = _recovery_code_hash(normalized)
+    with closing(sqlite3.connect(AUTH_DB, timeout=10)) as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT id FROM recovery_codes WHERE user_id=? AND code_hash=?",
+            (user_id, code_hash),
+        ).fetchone()
+        if not row:
+            con.rollback()
+            return False
+        con.execute("DELETE FROM recovery_codes WHERE id=?", (row[0],))
+        con.commit()
+    return True
+
+
+def reset_password_with_recovery_code(username, code, new_password):
+    """Consume one recovery code and update the account password atomically."""
+    normalized = _normalized_recovery_code(code)
+    if not normalized or len(new_password or "") < MIN_PASSWORD_LEN:
+        return None
+    password_hash = generate_password_hash(new_password)
+    code_hash = _recovery_code_hash(normalized)
+    with closing(sqlite3.connect(AUTH_DB, timeout=10)) as con:
+        con.row_factory = sqlite3.Row
+        con.execute("BEGIN IMMEDIATE")
+        user = con.execute(
+            "SELECT id, username FROM users WHERE username=?",
+            ((username or "").strip(),),
+        ).fetchone()
+        if not user:
+            con.rollback()
+            return None
+        recovery_code = con.execute(
+            "SELECT id FROM recovery_codes WHERE user_id=? AND code_hash=?",
+            (user["id"], code_hash),
+        ).fetchone()
+        if not recovery_code:
+            con.rollback()
+            return None
+        con.execute("DELETE FROM recovery_codes WHERE id=?", (recovery_code["id"],))
+        con.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (password_hash, user["id"]),
+        )
+        con.commit()
+        return dict(user)
+
+
 def get_user_by_id(user_id):
     rows = _q("SELECT * FROM users WHERE id=?", (user_id,), fetch=True)
     return rows[0] if rows else None
@@ -152,6 +240,7 @@ def first_user_id_excluding(user_id):
 def delete_user(user_id, replacement_session_id=None, replacement_owner_id=None):
     with closing(sqlite3.connect(AUTH_DB, timeout=10)) as con:
         con.execute("DELETE FROM session_owners WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
         if replacement_session_id and replacement_owner_id is not None:
             con.execute(
                 "INSERT OR REPLACE INTO session_owners (session_id, user_id) VALUES (?, ?)",

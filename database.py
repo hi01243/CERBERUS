@@ -1,7 +1,10 @@
 import sqlite3
 import os
 
-DB_NAME = "cerberus.db"
+DATA_DIR = os.environ.get("CERBERUS_DATA_DIR")
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+DB_NAME = os.path.join(DATA_DIR, "cerberus.db") if DATA_DIR else "cerberus.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)

@@ -37,7 +37,7 @@ Internally, flags are logged under these types:
 - **Multi-camera grouping**: the same violation seen by several cameras within 5 seconds shows as one card with a camera picker (display only; nothing is merged or deleted)
 - **Live rule toggles**: switch phone, reach, or gaze detection on or off per exam, for example when calculators are allowed. Turning Phone off also turns off the wrist-crop check and the hands-at-chest fallback. Changes are written to the console log with the username
 - **Recalibrate button**: restarts every student's neutral-pose calibration without cutting the recording, for when students change seats
-- **Accounts and MFA**: username and password sign-up, optional authenticator-app (TOTP) MFA that can be switched off again with a current code, and MFA-gated account deletion
+- **Accounts and MFA**: username and password sign-up, optional authenticator-app (TOTP) MFA, one-time recovery codes for password/account recovery, and MFA-gated account deletion
 - **Crash recovery**: recordings left half-written by a crash or power loss are finalised on the next start (a file cut off mid-write may still not play)
 
 ---
@@ -72,14 +72,31 @@ python app.py
 
 Then open <http://127.0.0.1:5000>. The console prints the build ID on startup. Create your first account at `/signup`.
 
+### Deploying on Render (free demo)
+
+The included [`render.yaml`](./render.yaml) deploys a **free demo**. It skips PyTorch/Ultralytics and disables live monitoring so it can fit the free web-service footprint. Use it to preview the login, account, session, and review pages, not to proctor an exam.
+
+1. Push the project to a GitHub repository that Render can access. Make sure the repository includes `render.yaml`, `requirements-render-free.txt`, and the app files.
+2. Sign in to Render, click **New + → Blueprint**, connect GitHub if prompted, and select your repository.
+3. Review the Blueprint. It should show a web service named `cerberus-demo` with the **Free** plan. Click **Apply** to create it.
+4. Open the service's **Events** or **Logs** page and wait for the build and deploy to complete. On first build, installing OpenCV may take a few minutes.
+5. Open the service's `https://...onrender.com` URL. Create a test account at `/signup` and save the recovery codes if you want to test recovery.
+6. Expect the first page load after inactivity to take about a minute while Render wakes the service. Free services can sleep after 15 minutes without traffic.
+
+**Important free-tier limits:** Render's free filesystem is ephemeral. The app's users, password hashes, recovery codes, and other database records are in local SQLite files under `/tmp/cerberus-data`; they are lost when the service sleeps, restarts, or redeploys. Recordings and evidence are also temporary. Don't use real account details or depend on this instance to retain data. The free demo explicitly disables camera/inference routes; the Render server also cannot use a webcam plugged into your computer. Do not use this deployment for a real exam.
+
+For current free-service behavior, see Render's [Free services documentation](https://render.com/docs/free). To enable live detection and durable records later, switch to a paid instance with persistent storage and use the full `requirements-render.txt` dependencies.
+
 ### Configuration
 
 | Environment variable | Purpose | Default |
 |----------------------|---------|---------|
 | `CERBERUS_SECRET_KEY` | Flask session key. Set it to stay signed in across restarts | Random key each run (everyone is signed out on restart) |
 | `CERBERUS_HOST` | Interface to listen on. Use `0.0.0.0` to reach the dashboard from other devices | `127.0.0.1` |
+| `CERBERUS_DATA_DIR` | Directory for SQLite databases, recordings, and evidence images | Project-specific locations |
+| `CERBERUS_DEMO_MODE` | Skips ML imports and disables live detection routes for the free Render demo | `0` |
 
-The port is fixed at 5000.
+The built-in development server listens on port 5000. On Render, Gunicorn binds to Render's injected `PORT`.
 
 > **Sign-up is open.** Anyone who can reach the login page can create an account. The default `127.0.0.1` setting keeps that to your own machine. If you set `CERBERUS_HOST=0.0.0.0`, only do so on a network you trust.
 
@@ -118,7 +135,7 @@ These figures follow from how the detection geometry works. They are starting po
 
 ## Using CERBERUS
 
-1. **Sign up** at `/signup` with a username (3-32 characters: letters, numbers, `_ . -`) and a password (8+ characters). You can enable authenticator MFA at the same time, or later at `/security/mfa`.
+1. **Sign up** at `/signup` with a username (3-32 characters: letters, numbers, `_ . -`) and a password (8+ characters). Save the one-time recovery codes shown after signup. You can enable authenticator MFA at the same time, or later at `/security/mfa`.
 2. On the **Sessions** page (`/`), name a new session and start it, or open one of your existing sessions.
 3. On the **Monitor** page (`/monitor`):
    - Camera 0 is registered by default. Add others by entering a device number, an IP/RTSP URL, or a video file path (the file must exist on the machine running CERBERUS).
@@ -152,7 +169,7 @@ Deletion is deliberately hard to do by accident:
 
 Deleting or resetting a session removes its database rows, recordings, and evidence images. Deleting an account removes all of its owned sessions and evidence. These actions cannot be undone.
 
-> **Keep your MFA setup key somewhere safe.** Once MFA is on, sign-in needs an authenticator code, and there are no backup codes. If you lose the device, you are locked out of that account.
+> **Save your recovery codes somewhere private.** Each code can be used once to reset your password or sign in when MFA is enabled. You can generate a new set while signed in; doing so invalidates the previous set.
 
 ---
 

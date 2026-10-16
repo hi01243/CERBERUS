@@ -85,6 +85,7 @@
     <div class="account-actions">
       <span class="user-chip"><span class="user-dot" aria-hidden="true"></span><span class="user-name">{{ session.get('username', '-') }}</span></span>
       <a class="account-link" href="/security/mfa">{% if mfa_enabled %}MFA settings{% else %}Set up MFA{% endif %}</a>
+      <a class="account-link" href="/security/recovery-codes">Recovery codes</a>
       <a class="delete-account-link" href="/account/delete">Delete account</a>
       <form class="signout-form" action="/logout" method="post"><button class="signout-button" type="submit">Sign out</button></form>
     </div>

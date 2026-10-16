@@ -29,10 +29,10 @@
     <p class="sub">Exam proctoring dashboard</p>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     {% if verification_username %}
-      <p class="sub">Enter the current code from your authenticator app.</p>
+      <p class="sub">Enter a current authenticator code or one of your unused recovery codes.</p>
       <input type="hidden" name="step" value="verify">
-      <label for="code">Authenticator code</label>
-      <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" autofocus required>
+      <label for="code">Authenticator or recovery code</label>
+      <input type="text" id="code" name="code" autocomplete="one-time-code" maxlength="19" autofocus required>
       <button type="submit">Verify and sign in</button>
     {% else %}
       <label for="username">Username</label>
@@ -41,6 +41,7 @@
       <input type="password" id="password" name="password" autocomplete="current-password" required>
       <button type="submit">Sign in</button>
     {% endif %}
+    <p class="alt"><a href="/recover-account">Forgot your password? Use a recovery code</a></p>
     <p class="alt">No account yet? <a href="/signup">Sign up</a></p>
   </form>
 </body>

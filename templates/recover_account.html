@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERBERUS - Recover account</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo-symbol.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; background-color:var(--cerb-bg); background-image:linear-gradient(rgba(135,184,154,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(135,184,154,.035) 1px,transparent 1px); background-size:36px 36px; color:var(--cerb-text); font:14px/1.5 var(--cerb-font); }
+  form { width:min(390px,100%); padding:30px; border:1px solid var(--cerb-line); border-radius:7px; background:var(--cerb-surface); box-shadow:0 22px 70px rgba(0,0,0,.24); }
+  h1 { margin:0 0 4px; font-size:16px; font-weight:800; letter-spacing:.08em; }
+  p.sub { color:var(--cerb-muted); margin:0 0 18px; font-size:12px; }
+  label { display:block; margin-bottom:6px; color:var(--cerb-muted); font-size:12px; }
+  input { width:100%; padding:10px 11px; margin-bottom:14px; border:1px solid var(--cerb-line); border-radius:4px; background:var(--cerb-bg); color:var(--cerb-text); font:inherit; }
+  input:focus { border-color:var(--cerb-green); }
+  button { width:100%; min-height:40px; padding:9px; border:1px solid var(--cerb-green); border-radius:4px; background:var(--cerb-green); color:var(--cerb-green-ink); font:inherit; font-weight:700; cursor:pointer; }
+  button:hover { filter:brightness(1.06); }
+  .error { color:var(--cerb-red); font-size:12px; margin:-8px 0 14px; }
+  .alt { text-align:center; margin-top:16px; font-size:12px; color:var(--cerb-muted); }
+  .alt a { color:var(--cerb-green); text-decoration:none; }
+  .alt a:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+  <form method="post">
+    <img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="44" style="display:block;height:44px;width:auto;margin:0 0 10px">
+    <h1>RECOVER ACCOUNT</h1>
+    <p class="sub">Use one unused recovery code to set a new password. The code can only be used once.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+    <label for="recovery_code">Recovery code</label>
+    <input type="text" id="recovery_code" name="recovery_code" autocomplete="off" autocapitalize="characters" maxlength="19" required>
+    <label for="password">New password</label>
+    <input type="password" id="password" name="password" autocomplete="new-password" minlength="8" required>
+    <label for="password_confirm">Confirm new password</label>
+    <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" minlength="8" required>
+    <button type="submit">Reset password and recover account</button>
+    <p class="alt"><a href="/login">Back to sign in</a></p>
+  </form>
+</body>
+</html>

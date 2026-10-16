@@ -1,7 +1,6 @@
 from flask import (Flask, render_template, Response, jsonify, request,
-                    send_from_directory, session, redirect, url_for)
+                    send_from_directory, session, redirect, url_for, make_response)
 import cv2
-from ultralytics import YOLO
 import os
 import re
 import time
@@ -12,14 +11,25 @@ from datetime import datetime
 from collections import deque
 import math
 import numpy as np
-try:
-    import torch
-    _CUDA = bool(torch.cuda.is_available())
-    _GPU_NAME = torch.cuda.get_device_name(0) if _CUDA else ""
-except Exception:
+DEMO_MODE = os.environ.get("CERBERUS_DEMO_MODE") == "1"
+if DEMO_MODE:
     _CUDA, _GPU_NAME = False, ""
+else:
+    try:
+        import torch
+        _CUDA = bool(torch.cuda.is_available())
+        _GPU_NAME = torch.cuda.get_device_name(0) if _CUDA else ""
+    except Exception:
+        _CUDA, _GPU_NAME = False, ""
 DEVICE = 0 if _CUDA else "cpu"   # NVIDIA GPU when CUDA works, otherwise CPU
-USE_HALF = _CUDA                 # fp16 only makes sense on a CUDA GPU
+USE_HALF = False                 # fp16 only makes sense on a CUDA GPU
+
+
+def _load_yolo(model_path):
+    if DEMO_MODE:
+        raise RuntimeError("Camera detection is disabled in Render free demo mode.")
+    from ultralytics import YOLO
+    return YOLO(model_path)
 
 
 from database import init_db, log_violation, get_recent_violations, clear_violations
@@ -29,7 +39,8 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
                        cleanup_orphaned_recordings, RECORDINGS_FOLDER)
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
-                  delete_user)
+                  delete_user, generate_recovery_codes, verify_recovery_code,
+                  reset_password_with_recovery_code, MIN_PASSWORD_LEN)
 
 BUILD_ID = "2026-10-11-r47-phone-verify"
 print(f"[cerberus] app.py build {BUILD_ID}")
@@ -43,7 +54,11 @@ init_incident_db()
 init_auth_db()
 cleanup_orphaned_recordings()  # finalise any half-written recordings from a previous crash
 
-VIOLATION_FOLDER = os.path.join('static', 'violations')
+DATA_DIR = os.environ.get("CERBERUS_DATA_DIR")
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+VIOLATION_FOLDER = (os.path.join(DATA_DIR, 'violations') if DATA_DIR
+                    else os.path.join('static', 'violations'))
 os.makedirs(VIOLATION_FOLDER, exist_ok=True)
 
 CURRENT_SESSION = "SESSION_ROOM_A1"
@@ -480,10 +495,10 @@ def activate_camera(cam_id):
             entry["cap"] = cap
 
         if entry["pose_model"] is None:
-            entry["pose_model"] = YOLO('yolo11n-pose.pt')
+            entry["pose_model"] = _load_yolo('yolo11n-pose.pt')
         if entry["object_model"] is None:
             try:
-                entry["object_model"] = YOLO(PHONE_MODEL)
+                entry["object_model"] = _load_yolo(PHONE_MODEL)
             except Exception as e:
                 return False, f"Could not load phone model {PHONE_MODEL}: {e}"
             if PHONE_MODEL == WRIST_CROP_MODEL:
@@ -648,7 +663,7 @@ def _wrist_model(entry):
     m = entry.get("wrist_model")
     if m is None:
         try:
-            m = YOLO(WRIST_CROP_MODEL)
+            m = _load_yolo(WRIST_CROP_MODEL)
             print(f"[cerberus] wrist-crop model: {WRIST_CROP_MODEL}")
         except Exception as e:
             print(f"[cerberus] could not load {WRIST_CROP_MODEL} ({e}); using the nano model")
@@ -2221,7 +2236,7 @@ def generate_frames(camera_id):
 # ==========================================
 app.secret_key = os.environ.get("CERBERUS_SECRET_KEY") or secrets.token_hex(32)
 
-PUBLIC_ENDPOINTS = {"login", "signup"}
+PUBLIC_ENDPOINTS = {"login", "signup", "recover_account"}
 
 
 @app.before_request
@@ -2230,6 +2245,13 @@ def _require_login():
         return
     if request.endpoint == "static":
         return _guard_static()
+    if DEMO_MODE and request.endpoint == "monitor":
+        return redirect(url_for("index"))
+    if DEMO_MODE and request.endpoint in LIVE_ENDPOINTS:
+        return jsonify({
+            "status": "unavailable",
+            "message": "Live camera detection is disabled in the Render free demo.",
+        }), 503
     if session.get("user_id") is not None and not get_user_by_id(session["user_id"]):
         session.clear()
     if not session.get("user_id"):
@@ -2244,12 +2266,14 @@ def login():
         pending_user_id = session.get('pending_login_user_id')
         if pending_user_id and request.form.get('step') == 'verify':
             user = get_user_by_id(pending_user_id)
-            if user and verify_totp(user.get('totp_secret'), request.form.get('code')):
+            code = request.form.get('code', '')
+            if user and (verify_totp(user.get('totp_secret'), code)
+                         or verify_recovery_code(user['id'], code)):
                 session.clear()
                 session['user_id'] = user['id']
                 session['username'] = user['username']
                 return redirect(url_for('index'))
-            error = 'Authenticator code is invalid or expired.'
+            error = 'Authenticator or recovery code is invalid, expired, or already used.'
             return render_template('login.html', error=error, verification_username=session.get('pending_login_username'))
 
         username = (request.form.get('username') or '').strip()
@@ -2282,10 +2306,59 @@ def signup():
             session.clear()
             session['user_id'] = user_id
             session['username'] = username
-            if request.form.get('enable_mfa') == '1':
-                return redirect(url_for('mfa_setup'))
-            return redirect(url_for('index'))
+            recovery_codes = generate_recovery_codes(user_id)
+            next_url = url_for('mfa_setup') if request.form.get('enable_mfa') == '1' else url_for('index')
+            response = make_response(render_template(
+                'recovery_codes.html', recovery_codes=recovery_codes,
+                next_url=next_url, error=None,
+            ))
+            response.headers['Cache-Control'] = 'no-store'
+            return response
     return render_template('signup.html', error=error)
+
+
+@app.route('/recover-account', methods=['GET', 'POST'])
+def recover_account():
+    error = None
+    if request.method == 'POST':
+        username = (request.form.get('username') or '').strip()
+        recovery_code = request.form.get('recovery_code', '')
+        password = request.form.get('password', '')
+        confirmation = request.form.get('password_confirm', '')
+        if len(password) < MIN_PASSWORD_LEN:
+            error = f'Password must be at least {MIN_PASSWORD_LEN} characters.'
+        elif password != confirmation:
+            error = 'The new passwords do not match.'
+        else:
+            user = reset_password_with_recovery_code(username, recovery_code, password)
+            if user:
+                session.clear()
+                session['user_id'] = user['id']
+                session['username'] = user['username']
+                return redirect(url_for('index'))
+            error = 'The username or recovery code is invalid or the code has already been used.'
+    return render_template('recover_account.html', error=error)
+
+
+@app.route('/security/recovery-codes', methods=['GET', 'POST'])
+def recovery_code_settings():
+    user = get_user_by_id(session.get('user_id'))
+    if not user:
+        session.clear()
+        return redirect(url_for('login'))
+    error = None
+    recovery_codes = None
+    if request.method == 'POST':
+        if not verify_user(user['username'], request.form.get('password', '')):
+            error = 'The current password is incorrect.'
+        else:
+            recovery_codes = generate_recovery_codes(user['id'])
+    response = make_response(render_template(
+        'recovery_codes.html', recovery_codes=recovery_codes,
+        next_url=url_for('index'), error=error,
+    ))
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/security/mfa', methods=['GET', 'POST'])
@@ -2320,8 +2393,10 @@ def disable_mfa():
     user_id = session.get('user_id')
     secret = get_totp_secret(user_id)
     data = request.get_json(silent=True) or {}
-    if not secret or not verify_totp(secret, data.get('code')):
-        return jsonify({'message': 'Authenticator code is invalid or expired.'}), 403
+    code = data.get('code')
+    if not secret or (not verify_totp(secret, code)
+                      and not verify_recovery_code(user_id, code)):
+        return jsonify({'message': 'Authenticator or recovery code is invalid, expired, or already used.'}), 403
     save_totp_secret(user_id, None)
     return jsonify({'status': 'disabled'})
 
@@ -2409,6 +2484,8 @@ def index():
 
 @app.route('/monitor')
 def monitor():
+    if DEMO_MODE:
+        return redirect(url_for('index'))
     return render_template('index.html')
 
 
@@ -2758,7 +2835,10 @@ def incidents_route():
     rows = list_incidents(session_id)
     for r in rows:
         r['video_url'] = f"/recordings/{r['recording']}" if r['recording'] else None
-        r['thumb_url'] = f"/static/{r['thumb']}"         if r['thumb']      else None
+        thumb_path = r.get('thumb') or ''
+        if thumb_path.startswith('violations/'):
+            thumb_path = thumb_path[len('violations/'):]
+        r['thumb_url'] = url_for('serve_evidence', filepath=thumb_path) if thumb_path else None
     return jsonify(rows)
 
 
@@ -2774,6 +2854,11 @@ def dismiss_incident_route(inc_id):
 @app.route('/recordings/<path:filepath>')
 def serve_recording(filepath):
     return send_from_directory(RECORDINGS_FOLDER, filepath, conditional=True)
+
+
+@app.route('/evidence/<path:filepath>')
+def serve_evidence(filepath):
+    return send_from_directory(VIOLATION_FOLDER, filepath, conditional=True)
 
 
 @app.route('/settings', methods=['GET', 'POST'])
@@ -2927,6 +3012,9 @@ def _guard_session_access():
     elif ep == "delete_session_route":
         sid = (request.view_args or {}).get("session_id")
     elif ep == "serve_recording":
+        sid = ((request.view_args or {}).get("filepath") or "").split("/")[0]
+        must_be_valid = True
+    elif ep == "serve_evidence":
         sid = ((request.view_args or {}).get("filepath") or "").split("/")[0]
         must_be_valid = True
 
