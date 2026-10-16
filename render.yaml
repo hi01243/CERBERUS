@@ -3,7 +3,7 @@ services:
     name: cerberus-demo
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements-render-free.txt
+    buildCommand: pip install -r requirements-render.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
     envVars:
       - key: PYTHON_VERSION
@@ -13,4 +13,4 @@ services:
       - key: CERBERUS_DATA_DIR
         value: /tmp/cerberus-data
       - key: CERBERUS_DEMO_MODE
-        value: "1"
+        value: "0"
