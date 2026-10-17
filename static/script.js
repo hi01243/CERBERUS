@@ -15,6 +15,7 @@ const esc = s => String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 let cachedCameraSignature = "";
+const browserCameraStreams = new Map();
 
 async function loadCameras() {
     try {
@@ -27,7 +28,7 @@ async function loadCameras() {
         // added/removed, or a status flip). Re-rendering on every poll
         // tick would recreate the <img> elements for active streams,
         // which restarts their MJPEG connection and causes flicker.
-        const signature = cameras.map(c => `${c.id}:${c.status}:${c.label}`).join('|');
+        const signature = cameras.map(c => `${c.id}:${c.status}:${c.label}:${c.type}`).join('|');
         if (signature === cachedCameraSignature) return;
         cachedCameraSignature = signature;
 
@@ -57,12 +58,12 @@ function renderCameraGrid(cameras) {
                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                        <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>
                    </svg>
-                   <p>${isPaused ? "Paused" : "Not in use"}</p>
+                   <p>${isPaused ? "Paused" : cam.type === "browser" ? "Tap Use to start this device's camera" : "Not in use"}</p>
                </div>`;
 
         const actionBtn = isActive
             ? `<button class="tile-btn" onclick="pauseCamera('${cam.id}')">⏸ Pause</button>`
-            : `<button class="tile-btn tile-btn-primary" onclick="useCamera('${cam.id}')">▶ Use</button>`;
+            : `<button class="tile-btn tile-btn-primary" onclick="useCamera('${cam.id}', '${cam.type}')">▶ Use</button>`;
 
         return `
         <div class="camera-tile">
@@ -75,6 +76,34 @@ function renderCameraGrid(cameras) {
             </div>
         </div>`;
     }).join('');
+}
+
+async function addBrowserCamera() {
+    const statusEl = document.getElementById("scanStatus");
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        statusEl.innerText = "Browser camera needs HTTPS or localhost in a supported browser.";
+        return;
+    }
+
+    statusEl.innerText = "Adding this device's camera...";
+    try {
+        const res = await fetch('/cameras/browser/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: "This Device" })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            statusEl.innerText = data.message || "Could not add this device's camera.";
+            return;
+        }
+        statusEl.innerText = "Camera added — tap 'Use' on its tile and allow camera access.";
+        cachedCameraSignature = "";
+        await loadCameras();
+    } catch (err) {
+        console.error("Add browser camera failed:", err);
+        statusEl.innerText = "Could not add this device's camera — check the console.";
+    }
 }
 
 async function scanCameras() {
@@ -161,24 +190,103 @@ async function addIpCamera() {
     }
 }
 
-async function useCamera(camId) {
+async function useCamera(camId, camType) {
+    let stream = null;
     try {
+        if (camType === "browser") {
+            if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+                alert("Browser camera access needs HTTPS or localhost in a supported browser.");
+                return;
+            }
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: { ideal: "environment" },
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                },
+                audio: false
+            });
+        }
+
         const res = await fetch(`/cameras/${camId}/activate`, { method: 'POST' });
         const data = await res.json();
         if (!res.ok) {
+            stream?.getTracks().forEach(track => track.stop());
             alert(data.message || "Could not activate this camera. Is it already in use by another app?");
             return;
         }
+        if (stream) startBrowserCameraUpload(camId, stream);
         cachedCameraSignature = "";
         loadCameras();
     } catch (err) {
+        stream?.getTracks().forEach(track => track.stop());
         console.error("Activate failed:", err);
+        if (camType === "browser") {
+            alert(err.name === "NotAllowedError"
+                ? "Camera permission was denied. Allow camera access in your browser settings and try again."
+                : `Could not start this device's camera: ${err.message || err}`);
+        }
     }
+}
+
+function startBrowserCameraUpload(camId, stream) {
+    const video = document.createElement("video");
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    let sending = false;
+    let stopped = false;
+
+    const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(timer);
+        stream.getTracks().forEach(track => track.stop());
+        video.srcObject = null;
+        browserCameraStreams.delete(camId);
+    };
+
+    const sendFrame = async () => {
+        if (stopped || sending || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        sending = true;
+        try {
+            const scale = Math.min(1, 640 / video.videoWidth, 480 / video.videoHeight);
+            canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+            canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.72));
+            if (!blob || stopped) return;
+            const response = await fetch(`/cameras/${camId}/frame`, {
+                method: "POST",
+                headers: { "Content-Type": "image/jpeg" },
+                body: blob
+            });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.message || `HTTP ${response.status}`);
+            }
+        } catch (err) {
+            console.error(`Browser camera ${camId} frame upload failed:`, err);
+        } finally {
+            sending = false;
+        }
+    };
+
+    const timer = setInterval(sendFrame, 200);
+    browserCameraStreams.set(camId, { stop, stream });
+    video.play().catch(err => console.error("Could not start browser camera preview:", err));
+    sendFrame();
 }
 
 async function pauseCamera(camId) {
     try {
-        await fetch(`/cameras/${camId}/pause`, { method: 'POST' });
+        const res = await fetch(`/cameras/${camId}/pause`, { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        browserCameraStreams.get(camId)?.stop();
         cachedCameraSignature = "";
         loadCameras();
     } catch (err) {
@@ -191,12 +299,21 @@ async function removeCamera(camId) {
         return;
     }
     try {
-        await fetch(`/cameras/${camId}/remove`, { method: 'POST' });
+        const res = await fetch(`/cameras/${camId}/remove`, { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        browserCameraStreams.get(camId)?.stop();
         cachedCameraSignature = "";
         loadCameras();
     } catch (err) {
         console.error("Remove failed:", err);
     }
+
+    window.addEventListener("pagehide", () => {
+        for (const [camId, camera] of browserCameraStreams) {
+            fetch(`/cameras/${camId}/pause`, { method: "POST", keepalive: true }).catch(() => {});
+            camera.stop();
+        }
+    });
 }
 
 // ==========================================

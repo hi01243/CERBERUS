@@ -391,9 +391,60 @@ class ThreadedCapture:
             self._cap.release()
 
 
+class BrowserCapture:
+    """Receives the newest JPEG-decoded frame uploaded by a browser camera."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frame = None
+        self._seq = 0
+        self._taken = 0
+        self._closed = False
+
+    def submit(self, frame):
+        with self._lock:
+            if self._closed:
+                return False
+            self._frame = frame
+            self._seq += 1
+        return True
+
+    def isOpened(self):
+        with self._lock:
+            return not self._closed
+
+    def grab(self):
+        return self.isOpened()
+
+    def get(self, _prop):
+        return 0
+
+    def set(self, _prop, _value):
+        return True
+
+    def read(self, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            with self._lock:
+                if self._closed:
+                    return False, None
+                if self._frame is not None and self._seq != self._taken:
+                    self._taken = self._seq
+                    return True, self._frame.copy()
+            time.sleep(0.004)
+        return False, None
+
+    def release(self):
+        with self._lock:
+            self._closed = True
+            self._frame = None
+
+
 def _open_capture(source, cam_type):
     """Live cameras get the background reader; video files stay a plain VideoCapture
     so every frame is processed (nothing is skipped while testing on files)."""
+    if cam_type == "browser":
+        return BrowserCapture()
     if cam_type != "file" and THREADED_CAPTURE:
         return ThreadedCapture(source)
     cap = cv2.VideoCapture(source)
@@ -1427,6 +1478,9 @@ def _detection_loop(camera_id):
                         if cap is not None:
                             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     time.sleep(0.1)
+                    continue
+                elif entry["type"] == "browser":
+                    time.sleep(0.03)
                     continue
                 else:
                     with entry["lock"]:
@@ -2634,6 +2688,47 @@ def add_camera_route():
     return jsonify({"status": "added", "camera_id": cam_id})
 
 
+@app.route('/cameras/browser/add', methods=['POST'])
+def add_browser_camera_route():
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "").strip() or "This Device"
+    cam_id = add_camera("browser", "browser", label)
+    return jsonify({"status": "added", "camera_id": cam_id})
+
+
+@app.route('/cameras/<camera_id>/frame', methods=['POST'])
+def browser_camera_frame_route(camera_id):
+    entry = camera_registry.get(camera_id)
+    if entry is None or entry["type"] != "browser":
+        return jsonify({"status": "error", "message": "Browser camera not found."}), 404
+    if entry["status"] != "active" or not isinstance(entry.get("cap"), BrowserCapture):
+        return jsonify({"status": "error", "message": "Browser camera is not active."}), 409
+    if request.mimetype != "image/jpeg":
+        return jsonify({"status": "error", "message": "Expected an image/jpeg frame."}), 415
+    max_frame_bytes = 2 * 1024 * 1024
+    if request.content_length is not None and request.content_length > max_frame_bytes:
+        return jsonify({"status": "error", "message": "Camera frame is too large."}), 413
+
+    payload = request.stream.read(max_frame_bytes + 1)
+    if len(payload) > max_frame_bytes:
+        return jsonify({"status": "error", "message": "Camera frame is too large."}), 413
+    if not payload:
+        return jsonify({"status": "error", "message": "Camera frame is empty."}), 400
+
+    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None or frame.size == 0:
+        return jsonify({"status": "error", "message": "Could not decode camera frame."}), 400
+    height, width = frame.shape[:2]
+    if width > 1280 or height > 720:
+        scale = min(1280 / width, 720 / height)
+        frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
+
+    cap = entry.get("cap")
+    if not isinstance(cap, BrowserCapture) or not cap.submit(frame):
+        return jsonify({"status": "error", "message": "Browser camera is no longer active."}), 409
+    return jsonify({"status": "received"})
+
+
 @app.route('/cameras/<camera_id>/activate', methods=['POST'])
 def activate_camera_route(camera_id):
     ok, msg = activate_camera(camera_id)
@@ -2916,6 +3011,7 @@ LIVE_ENDPOINTS = {
     "monitor", "video_feed", "get_session_route", "settings_route", "system_stats",
     "get_violations", "start_monitoring", "stop_monitoring", "reset_session",
     "list_cameras", "scan_cameras_route", "add_camera_route",
+    "add_browser_camera_route", "browser_camera_frame_route",
     "activate_camera_route", "pause_camera_route", "remove_camera_route",
     "recalibrate_route",
 }

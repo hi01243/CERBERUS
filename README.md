@@ -70,11 +70,11 @@ To use an NVIDIA GPU, install the CUDA build of PyTorch from <https://pytorch.or
 python app.py
 ```
 
-Then open <http://127.0.0.1:5000>. The console prints the build ID on startup. Create your first account at `/signup`.
+Then open <http://127.0.0.1:5000>. The console prints the build ID on startup. Create your first account at `/signup`. On a phone, `localhost` means the phone itself; use it only when the app server is running on that phone. If the server is on a computer, open it from the phone over HTTPS (for example, through an HTTPS tunnel) to allow browser camera access.
 
 ### Deploying on Render (free demo)
 
-The included [`render.yaml`](./render.yaml) deploys a **free demo**. It skips PyTorch/Ultralytics and disables live monitoring so it can fit the free web-service footprint. Use it to preview the login, account, session, and review pages, not to proctor an exam.
+The included [`render.yaml`](./render.yaml) deploys a **free demo**. To enable camera processing, use the full `requirements-render.txt` build command and set `CERBERUS_DEMO_MODE` to `0`. The monitor page then offers **Use this device's camera**, which asks the browser for camera permission and sends small frames to the server. Open the Render HTTPS site on the phone whose camera you want to use, and keep that monitor page open.
 
 1. Push the project to a GitHub repository that Render can access. Make sure the repository includes `render.yaml`, `requirements-render-free.txt`, and the app files.
 2. Sign in to Render, click **New + → Blueprint**, connect GitHub if prompted, and select your repository.
@@ -83,7 +83,7 @@ The included [`render.yaml`](./render.yaml) deploys a **free demo**. It skips Py
 5. Open the service's `https://...onrender.com` URL. Create a test account at `/signup` and save the recovery codes if you want to test recovery.
 6. Expect the first page load after inactivity to take about a minute while Render wakes the service. Free services can sleep after 15 minutes without traffic.
 
-**Important free-tier limits:** Render's free filesystem is ephemeral. The app's users, password hashes, recovery codes, and other database records are in local SQLite files under `/tmp/cerberus-data`; they are lost when the service sleeps, restarts, or redeploys. Recordings and evidence are also temporary. Don't use real account details or depend on this instance to retain data. The free demo explicitly disables camera/inference routes; the Render server also cannot use a webcam plugged into your computer. Do not use this deployment for a real exam.
+**Important free-tier limits:** Render's free filesystem is ephemeral. The app's users, password hashes, recovery codes, and other database records are in local SQLite files under `/tmp/cerberus-data`; they are lost when the service sleeps, restarts, or redeploys. Recordings and evidence are also temporary. Don't use real account details or depend on this instance to retain data. The phone camera works only through browser permission and HTTPS; local-camera scanning still looks for cameras attached to the Render server. Frame processing and model startup may be very slow or exceed free-instance memory. Do not use this deployment for a real exam.
 
 For current free-service behavior, see Render's [Free services documentation](https://render.com/docs/free). To enable live detection and durable records later, switch to a paid instance with persistent storage and use the full `requirements-render.txt` dependencies.
 
@@ -148,6 +148,10 @@ These figures follow from how the detection geometry works. They are starting po
 ### Testing with video files
 
 A video-file camera loops its clip and processes every frame, so it plays only as fast as your machine can run the detectors. A slow machine plays the clip in slow motion, but because timers follow video time (`VIDEO_CLOCK`), the flags it produces are the same as in real time.
+
+### Testing with a phone camera through ngrok
+
+Run CERBERUS on the computer that has the detection models installed, then expose its local port with an HTTPS ngrok URL. Open that HTTPS URL on the phone, sign in, go to **Monitor**, click **Use this device's camera**, then click **Use** on its camera tile and allow browser camera access. Start monitoring to run detection. The tile shows the processed server stream with the overlays; the phone sends video frames only (no audio). Keep the phone's monitor page open during the test. A plain `http://localhost:5000` works for camera permission only when CERBERUS is running on that same phone; on the phone, `localhost` does not refer to your computer. Use this for testing only and make sure everyone being recorded has agreed.
 
 ### Accounts and session ownership
 
