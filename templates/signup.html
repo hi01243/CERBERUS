@@ -39,8 +39,10 @@
            value="{{ request.form.get('username', '') }}">
       <p class="hint">3-32 characters: letters, numbers, _ . -</p>
     <label for="password">Password</label>
-    <input type="password" id="password" name="password" autocomplete="new-password" required minlength="8">
-    <p class="hint">At least 8 characters.</p>
+    <input type="password" id="password" name="password" autocomplete="new-password" required minlength="14" pattern="(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).*">
+    <p class="hint">At least 14 characters, including uppercase and lowercase letters, a number, and a symbol.</p>
+    <label for="password_confirm">Confirm password</label>
+    <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required minlength="14">
     <p class="hint">After signup, CERBERUS will show your one-time recovery codes. Save them somewhere private.</p>
     <p class="hint">Use the code printed when CERBERUS starts, or ask whoever runs it. The code stays the same across restarts.</p>
     <label class="option" for="enable_mfa">

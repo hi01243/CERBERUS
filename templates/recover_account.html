@@ -33,9 +33,9 @@
     <label for="recovery_code">Recovery code</label>
     <input type="text" id="recovery_code" name="recovery_code" autocomplete="off" autocapitalize="characters" maxlength="19" required>
     <label for="password">New password</label>
-    <input type="password" id="password" name="password" autocomplete="new-password" minlength="8" required>
+    <input type="password" id="password" name="password" autocomplete="new-password" minlength="14" pattern="(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).*" required>
     <label for="password_confirm">Confirm new password</label>
-    <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" minlength="8" required>
+    <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" minlength="14" required>
     <button type="submit">Reset password and recover account</button>
     <p class="alt"><a href="/login">Back to sign in</a></p>
   </form>

@@ -18,8 +18,21 @@ if DATA_DIR:
     os.makedirs(DATA_DIR, exist_ok=True)
 AUTH_DB = os.path.join(DATA_DIR, "users.db") if DATA_DIR else os.path.join(BASE_DIR, "users.db")
 
-MIN_PASSWORD_LEN = 8
+MIN_PASSWORD_LEN = 14
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_.-]{3,32}$')
+
+
+def validate_password(password):
+    if len(password or "") < MIN_PASSWORD_LEN:
+        return f"Password must be at least {MIN_PASSWORD_LEN} characters."
+    if (not re.search(r"[A-Z]", password)
+            or not re.search(r"[a-z]", password)
+            or not re.search(r"[0-9]", password)
+            or not re.search(r"[^A-Za-z0-9\s]", password)):
+        return ("Password must include at least one uppercase letter, "
+                "lowercase letter, number, and symbol.")
+    return None
+
 
 def _q(sql, args=(), fetch=False):
     with closing(sqlite3.connect(AUTH_DB, timeout=10)) as con:
@@ -103,8 +116,9 @@ def create_user(username, password, invite_code=None):
     username = str(username or "").strip()
     if not USERNAME_RE.fullmatch(username):
         return None, "Username must be 3-32 characters: letters, numbers, _ . -"
-    if len(password or "") < MIN_PASSWORD_LEN:
-        return None, f"Password must be at least {MIN_PASSWORD_LEN} characters."
+    password_error = validate_password(password)
+    if password_error:
+        return None, password_error
     if _q("SELECT id FROM users WHERE username=?", (username,), fetch=True):
         return None, "That username is already taken."
 
@@ -176,7 +190,7 @@ def verify_recovery_code(user_id, code):
 def reset_password_with_recovery_code(username, code, new_password):
     """Consume one recovery code and update the account password atomically."""
     normalized = _normalized_recovery_code(code)
-    if not normalized or len(new_password or "") < MIN_PASSWORD_LEN:
+    if not normalized or validate_password(new_password):
         return None
     password_hash = generate_password_hash(new_password)
     code_hash = _recovery_code_hash(normalized)

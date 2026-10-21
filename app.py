@@ -1,16 +1,21 @@
 from flask import (Flask, render_template, Response, jsonify, request,
                     send_from_directory, session, redirect, url_for, make_response)
+import base64
 import cv2
+from io import BytesIO
 import os
 import re
 import time
 import shutil
 import secrets
 import threading
+from urllib.parse import urlencode
 from datetime import datetime
 from collections import deque
 import math
 import numpy as np
+import qrcode
+from qrcode.image.svg import SvgPathImage
 DEMO_MODE = os.environ.get("CERBERUS_DEMO_MODE") == "1"
 if DEMO_MODE:
     _CUDA, _GPU_NAME = False, ""
@@ -40,7 +45,7 @@ from recording import (SessionRecorder, IncidentTracker, init_incident_db,
 from auth import (create_user, get_user_by_id, init_auth_db, verify_user,
                   generate_totp_secret, get_totp_secret, save_totp_secret, verify_totp,
                   delete_user, generate_recovery_codes, verify_recovery_code,
-                  reset_password_with_recovery_code, MIN_PASSWORD_LEN)
+                  reset_password_with_recovery_code, validate_password)
 
 BUILD_ID = "2026-10-11-r47-phone-verify"
 print(f"[cerberus] app.py build {BUILD_ID}")
@@ -2353,7 +2358,12 @@ def signup():
     if request.method == 'POST':
         username = (request.form.get('username') or '').strip()
         password = request.form.get('password', '')
-        user_id, error = create_user(username, password)
+        confirmation = request.form.get('password_confirm', '')
+        if password != confirmation:
+            error = 'The passwords do not match.'
+            user_id = None
+        else:
+            user_id, error = create_user(username, password)
         if user_id:
             if user_count() == 1:
                 _assign_unowned_sessions(user_id)   # first account inherits sessions that predate ownership
@@ -2379,8 +2389,9 @@ def recover_account():
         recovery_code = request.form.get('recovery_code', '')
         password = request.form.get('password', '')
         confirmation = request.form.get('password_confirm', '')
-        if len(password) < MIN_PASSWORD_LEN:
-            error = f'Password must be at least {MIN_PASSWORD_LEN} characters.'
+        password_error = validate_password(password)
+        if password_error:
+            error = password_error
         elif password != confirmation:
             error = 'The new passwords do not match.'
         else:
@@ -2433,8 +2444,31 @@ def mfa_setup():
         pending_secret = generate_totp_secret()
         session['pending_totp_secret'] = pending_secret
 
-    return render_template('mfa_setup.html', enabled=bool(active_secret),
-                           secret=pending_secret, error=error)
+    qr_data_uri = None
+    if pending_secret and not active_secret:
+        provisioning_uri = 'otpauth://totp/CERBERUS?' + urlencode({
+            'secret': pending_secret,
+            'issuer': 'CERBERUS',
+            'algorithm': 'SHA1',
+            'digits': 6,
+            'period': 30,
+        })
+        qr = qrcode.QRCode(border=4, box_size=8)
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+        image = qr.make_image(image_factory=SvgPathImage)
+        buffer = BytesIO()
+        image.save(buffer)
+        qr_data_uri = 'data:image/svg+xml;base64,' + base64.b64encode(
+            buffer.getvalue()
+        ).decode('ascii')
+
+    response = make_response(render_template(
+        'mfa_setup.html', enabled=bool(active_secret), secret=pending_secret,
+        qr_data_uri=qr_data_uri, error=error,
+    ))
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/security/mfa/status')
