@@ -1,6 +1,0 @@
-Flask==3.1.3
-ultralytics==8.3.40
-numpy==1.26.4
-opencv-python==4.10.0.84
-lap==0.5.13
-qrcode==8.2
