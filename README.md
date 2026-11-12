@@ -33,7 +33,7 @@ Internally, flags are logged under these types:
 - **Per-account session ownership**: every session belongs to the account that created it, and other accounts cannot see it
 - **Recording in 5-minute files**: each camera saves to `recordings/<session>/<camera>/` at 10 fps and at most 960 px wide, and evidence images go to `static/violations/<session>/<camera>/`. A crash costs at most one file
 - **Incident grouping**: repeats of the same flag on the same student within 10 seconds are one incident, and students flagged at the same moment each get their own
-- **Review page**: play an incident from 5 seconds before the alert, jump around on an incident timeline, pick between recordings, filter active or dismissed flags, and dismiss false positives
+- **Review page**: play an incident from 5 seconds before the alert, jump around on an incident timeline, pick between recordings, filter active or dismissed flags, dismiss false positives, and undo a dismiss made by mistake
 - **Multi-camera grouping**: the same violation seen by several cameras within 5 seconds shows as one card with a camera picker (display only; nothing is merged or deleted)
 - **Live rule toggles**: switch phone, reach, or gaze detection on or off per exam, for example when calculators are allowed. Turning Phone off also turns off the wrist-crop and desk-crop checks. Changes are written to the console log with the username
 - **Recalibrate button**: restarts every student's neutral-pose calibration without cutting the recording, for when students change seats
@@ -60,21 +60,53 @@ cd cerberus
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-pip install flask opencv-python ultralytics numpy lapx
+pip install -r requirements.txt   # includes pywebview for the desktop window
 ```
 
 To use an NVIDIA GPU, install the CUDA build of PyTorch from <https://pytorch.org> before running. Check it with `python -c "import torch; print(torch.cuda.is_available())"`, which should print `True`.
 
 ## Running
 
+### Desktop app (default)
+
+```bash
+python desktop.py
+```
+
+Or double-click `run.bat`, which sets up the venv, installs the requirements, and opens the desktop app. CERBERUS opens in its own window (Microsoft Edge WebView2, built into Windows 10/11). The server runs privately on `127.0.0.1` on a random free port, so it is not reachable from other devices. Detection uses this computer's NVIDIA GPU when PyTorch can see it, otherwise the CPU. Create your first account on the sign-in screen.
+
+- **Closing the window** asks for confirmation, then stops monitoring, finalises open recordings and quits.
+- **Only one copy runs at a time.** Starting a second one shows "CERBERUS is already running".
+- **Review Recordings** opens in a second app window that shares your sign-in.
+- Set `CERBERUS_DEBUG=1` to enable the WebView developer tools (right-click > Inspect).
+
+#### Building the installable app
+
+```bash
+.\build_desktop.bat
+```
+
+This installs PyInstaller, builds `dist\Cerberus\Cerberus.exe` (with the icon from `static/cerberus.ico`), and then, if [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed, builds the installer **`installer\CerberusSetup.exe`** from [`installer.iss`](installer.iss) (about 1.5 GB for the GPU build, one file).
+
+**What the installer does:** installs for the current Windows user without admin rights (an administrator can choose all users), adds a Start menu shortcut and an optional desktop shortcut, offers to start CERBERUS at the end, and warns if the Microsoft Edge WebView2 Runtime is missing. Uninstalling (Settings > Apps) removes the program and asks whether to also delete the recordings and flags in `%LOCALAPPDATA%\Cerberus` (default: keep them). Installing a newer build over an old one upgrades it in place; raise `AppVersion` in `installer.iss` for each release. The installer is not code-signed, so Windows SmartScreen shows *Windows protected your PC*: click **More info > Run anyway**.
+
+Without Inno Setup, ship the whole `dist\Cerberus` folder instead, not just the `.exe`. `best_tuned.pt` must be next to `app.py`, and `yolo11n-pose.pt` is bundled too if present (otherwise it is downloaded on the first camera start). Evidence in `static/violations` is never bundled.
+
+- The build bundles whichever PyTorch is in the venv. A CUDA build runs on NVIDIA GPUs but makes the folder several GB. A CPU build runs everywhere and is much smaller.
+- The packaged app keeps its databases, recordings, evidence, model copies and `logs\cerberus.log` in `%LOCALAPPDATA%\Cerberus`, because the install folder may be read-only. Set `CERBERUS_DATA_DIR` to use another folder.
+- To give the `.exe` an icon, put a `static/cerberus.ico` file in place before building.
+
+### Browser mode
+
 ```bash
 python app.py
 ```
 
-<<<<<<< HEAD
-Then open <http://127.0.0.1:5000>. The console prints the build ID on startup. Create your first account at `/signup`. On a phone, `localhost` means the phone itself; use it only when the app server is running on that phone. If the server is on a computer, open it from the phone over HTTPS (for example, through an HTTPS tunnel) to allow browser camera access.
+Or run `run.bat web`. Then open <http://127.0.0.1:5000>. The console prints the build ID on startup, and whether inference runs on the GPU or the CPU. Create your first account at `/signup`. On a phone, `localhost` means the phone itself; use it only when the app server is running on that phone. If the server is on a computer, open it from the phone over HTTPS (for example, through an HTTPS tunnel) to allow browser camera access.
 
-### Deploying on Render (free demo)
+### Deploying on Render (free demo, legacy)
+
+> The desktop app replaces this. Render's free tier has no GPU and loses all data on restart, so it is only useful as a UI demo.
 
 The included [`render.yaml`](./render.yaml) deploys a **free demo**. To enable camera processing, use the full `requirements-render.txt` build command and set `CERBERUS_DEMO_MODE` to `0`. The monitor page then offers **Use this device's camera**, which asks the browser for camera permission and sends small frames to the server. Open the Render HTTPS site on the phone whose camera you want to use, and keep that monitor page open.
 
@@ -88,9 +120,6 @@ The included [`render.yaml`](./render.yaml) deploys a **free demo**. To enable c
 **Important free-tier limits:** Render's free filesystem is ephemeral. The app's users, password hashes, recovery codes, and other database records are in local SQLite files under `/tmp/cerberus-data`; they are lost when the service sleeps, restarts, or redeploys. Recordings and evidence are also temporary. Don't use real account details or depend on this instance to retain data. The phone camera works only through browser permission and HTTPS; local-camera scanning still looks for cameras attached to the Render server. Frame processing and model startup may be very slow or exceed free-instance memory. Do not use this deployment for a real exam.
 
 For current free-service behavior, see Render's [Free services documentation](https://render.com/docs/free). To enable live detection and durable records later, switch to a paid instance with persistent storage and use the full `requirements-render.txt` dependencies.
-=======
-Then open <http://127.0.0.1:5000>. The console prints the build ID on startup, and whether inference runs on the GPU or the CPU. Create your first account at `/signup`.
->>>>>>> dc99ada45b1ce22b77b88dae9f03033bf52c7ae0
 
 ### Configuration
 
@@ -98,9 +127,25 @@ Then open <http://127.0.0.1:5000>. The console prints the build ID on startup, a
 |----------------------|---------|---------|
 | `CERBERUS_SECRET_KEY` | Flask session key. Set it to stay signed in across restarts | Random key each run (everyone is signed out on restart) |
 | `CERBERUS_HOST` | Interface to listen on. Use `0.0.0.0` to reach the dashboard from other devices | `127.0.0.1` |
-| `CERBERUS_DATA_DIR` | Directory for SQLite databases, recordings, and evidence images | Project-specific locations |
+| `CERBERUS_DATA_DIR` | Directory for SQLite databases, recordings, and evidence images | Project-specific locations (`%LOCALAPPDATA%\Cerberus` in the packaged app) |
+| `CERBERUS_DEFAULT_CAMERA` | Device index shown as **Default camera** at start-up, or `none` to skip it | `0` |
+| `CERBERUS_DEBUG` | `1` enables the WebView developer tools in the desktop app | Off |
+| `CERBERUS_SUPABASE_URL`, `CERBERUS_SUPABASE_KEY` | Supabase project URL and **public** (anon / publishable) key for cloud accounts. Override `cloud_config.json` | Not set (local accounts) |
 
-The built-in development server listens on port 5000.
+### Cloud accounts (Supabase)
+
+By default, accounts are local to each PC. If a `cloud_config.json` file (copy `cloud_config.example.json`) or the two `CERBERUS_SUPABASE_*` variables are present, CERBERUS switches to cloud accounts:
+
+- **Accounts** use email and password in Supabase Auth, with optional authenticator MFA. Forgotten passwords are reset with a code sent by email. Cloud accounts have no recovery codes.
+- **Incident records and flag images** are saved locally first, then uploaded about every 8 seconds by a background thread (`cloud_sync.py`). If the PC is offline they queue and upload later. The Sessions page shows the sync state.
+- **Videos are never uploaded.** Each cloud row records the `device_id` of the PC that has the recording.
+- **Review on any PC:** signed in on another PC, the Sessions page also lists the sessions you recorded elsewhere (*Recorded on another PC*). Their flags open in Review with the flag image in place of the video. You can dismiss them, or undo a dismiss, from any PC: the PC that recorded the flag picks the change up within about 10 seconds, and if two PCs change the same flag the newest change wins. Delete a session on the PC that recorded it.
+- **Local accounts are never uploaded or migrated.** Sessions that belong to local (test) accounts stay on the PC, and those accounts can't sign in while cloud mode is on.
+- Deleting a session or an account removes its cloud copy too.
+
+Set it up with [SUPABASE_SETUP.md](SUPABASE_SETUP.md) (about 15 minutes, free plan). The schema and security rules are in [`supabase/setup.sql`](supabase/setup.sql). Never put the `service_role` / secret key in the app: CERBERUS refuses it.
+
+In browser mode the built-in development server listens on port 5000. The desktop app picks a free port on `127.0.0.1` and ignores `CERBERUS_HOST`.
 
 > **Sign-up is open.** Anyone who can reach the login page can create an account. The default `127.0.0.1` setting keeps that to your own machine. If you set `CERBERUS_HOST=0.0.0.0`, only do so on a network you trust.
 
@@ -143,15 +188,16 @@ These figures follow from how the detection geometry works. They are starting po
 
 ## Using CERBERUS
 
-1. **Sign up** at `/signup` with a username (3-32 characters: letters, numbers, `_ . -`) and a password (8+ characters). Save the one-time recovery codes shown after signup. You can enable authenticator MFA at the same time, or later at `/security/mfa`.
+1. **Sign up** at `/signup` with a username (3-32 characters: letters, numbers, `_ . -`) and a password (at least 8 characters, with an uppercase and a lowercase letter, a number, and a symbol). Save the one-time recovery codes shown after signup. You can enable authenticator MFA at the same time, or later at `/security/mfa`.
 2. On the **Sessions** page (`/`), name a new session and start it, or open one of your existing sessions.
 3. On the **Monitor** page (`/monitor`):
-   - Camera 0 is registered by default. Add others by entering a device number, an IP/RTSP URL, or a video file path (the file must exist on the machine running CERBERUS).
+   - This computer's default webcam (device 0) appears as **Default camera** at start-up, so you only need to click **Use**. It is not opened until then. Add others by entering a device number, an IP/RTSP URL, or a video file path (the file must exist on the machine running CERBERUS).
    - Click **Use** on a camera tile to start it. You can pause or remove a camera at any time.
    - Choose which **Detection Rules** apply to this exam.
    - Click **ARM MONITORING** to start flagging, and **PAUSE SYSTEM** to stop. Recordings are finalised on pause.
+   - **Signing out** (or closing the app) stops monitoring, pauses every camera and finalises the recordings.
    - Click **RECALIBRATE** if students change seats.
-4. Open **Review Recordings** (`/review`) to go through flags, watch the footage, and dismiss false positives. Dismissing cannot be undone.
+4. Open **Review Recordings** (`/review`) to go through flags, watch the footage, and dismiss false positives. A dismissed flag keeps its evidence and can be restored with **Undo dismiss**.
 
 ### Testing with video files
 
@@ -166,7 +212,7 @@ Run CERBERUS on the computer that has the detection models installed, then expos
 - Another account that asks for your session, recording, incident, or evidence image gets a 404.
 - There is one live session for the whole app. If the live session belongs to another account, the live controls refuse your requests (403) and `/monitor` sends you back to the Sessions page until you create your own session.
 - Another account can take over the live controls by creating its own session, which is only possible while monitoring is paused.
-- Session names are unique across accounts.
+- Different accounts can use the same session name. Each sees only its own session; on disk the second one gets a short suffix (for example `Math_Exam-3fa2c1`) so their files never mix.
 - When upgrading from a build without ownership, existing sessions go to the first account created.
 - Turning MFA off (at `/security/mfa`) requires a current authenticator code.
 - MFA is standard TOTP (6 digits, 30-second steps, SHA-1), so any authenticator app works. The previous and next code are also accepted to allow for clock drift. It is built into CERBERUS and needs no extra package.

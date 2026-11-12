@@ -85,7 +85,11 @@
     <div class="account-actions">
       <span class="user-chip"><span class="user-dot" aria-hidden="true"></span><span class="user-name">{{ session.get('username', '-') }}</span></span>
       <a class="account-link" href="/security/mfa">{% if mfa_enabled %}MFA settings{% else %}Set up MFA{% endif %}</a>
+      {% if cloud_mode %}
+      <span class="account-link" id="cloud-sync" title="Flags and images are copied to your cloud account. Videos stay on this PC.">Cloud: checking…</span>
+      {% else %}
       <a class="account-link" href="/security/recovery-codes">Recovery codes</a>
+      {% endif %}
       <a class="delete-account-link" href="/account/delete">Delete account</a>
       <form class="signout-form" action="/logout" method="post"><button class="signout-button" type="submit">Sign out</button></form>
     </div>
@@ -124,7 +128,7 @@ let sessions = [];
 function openSessionUrl(id) { return `/review?session_id=${encodeURIComponent(id)}`; }
 function renderSessions() {
   const query = document.getElementById('session-search').value.trim().toLowerCase();
-  const visible = sessions.filter(item => item.session_id.toLowerCase().includes(query));
+  const visible = sessions.filter(item => (item.name || item.session_id).toLowerCase().includes(query));
   list.replaceChildren();
   if (!visible.length) {
     const empty = document.createElement('div');
@@ -146,7 +150,13 @@ function renderSessions() {
     icon.setAttribute('aria-hidden', 'true');
     const title = document.createElement('span');
     title.className = 'session-name';
-    title.textContent = item.session_id;
+    title.textContent = item.name || item.session_id;
+    if (item.remote) {
+      const other = document.createElement('small');
+      other.className = 'current';
+      other.textContent = 'Recorded on another PC';
+      title.append(other);
+    }
     if (item.session_id === currentSession) {
       const current = document.createElement('small');
       current.className = 'current';
@@ -162,7 +172,9 @@ function renderSessions() {
     flags.innerHTML = `<strong>${item.flag_count}</strong> flags`;
     const preview = document.createElement('span');
     preview.className = 'file-preview';
-    preview.textContent = item.recordings.slice(0, 2).map(file => file.name).join('  /  ') || 'No recordings yet';
+    preview.textContent = item.remote
+      ? 'Videos are on the PC that recorded them; flag images are shown here'
+      : (item.recordings.slice(0, 2).map(file => file.name).join('  /  ') || 'No recordings yet');
     const open = document.createElement('a');
     open.className = 'session-open';
     open.href = openSessionUrl(item.session_id);
@@ -172,28 +184,29 @@ function renderSessions() {
     remove.type = 'button';
     remove.textContent = item.session_id === currentSession && monitoringActive ? 'Pause to delete' : 'Delete';
     remove.disabled = item.session_id === currentSession && monitoringActive;
-    remove.addEventListener('click', () => deleteSession(item.session_id, remove));
+    remove.addEventListener('click', () => deleteSession(item.session_id, item.name || item.session_id, remove));
     link.append(folder);
-    row.append(link, recordings, flags, preview, open, remove);
+    row.append(link, recordings, flags, preview, open);
+    if (!item.remote) row.append(remove);   // delete it on the PC that recorded it
     list.append(row);
   }
 }
 
-async function deleteSession(sessionId, button) {
+async function deleteSession(sessionId, sessionName, button) {
   button.disabled = true;
   notice.textContent = 'Confirming deletion...';
   try {
-    const confirmation = prompt(`Permanently delete all recordings and flags for "${sessionId}"?\n\nType the session name exactly to confirm:`);
-    if (confirmation !== sessionId) { button.disabled = false; notice.textContent = 'Session name did not match; deletion cancelled.'; return; }
+    const confirmation = prompt(`Permanently delete all recordings and flags for "${sessionName}"?\n\nType the session name exactly to confirm:`);
+    if (confirmation !== sessionName) { button.disabled = false; notice.textContent = 'Session name did not match; deletion cancelled.'; return; }
     const response = await fetch(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirm: confirmation })
+      body: JSON.stringify({ confirm: sessionId })
     });
     const result = await response.json();
     if (!response.ok) {
       throw new Error(result.message || 'Could not delete session.');
     }
-    notice.textContent = `Deleted ${sessionId}.`;
+    notice.textContent = `Deleted ${sessionName}.`;
     if (sessionId === currentSession) { location.reload(); return; }
     await loadSessions();
   } catch (error) {
@@ -243,6 +256,23 @@ document.getElementById('new-session-form').addEventListener('submit', async eve
   }
 });
 loadSessions();
+{% if cloud_mode %}
+async function refreshCloudStatus() {
+  const el = document.getElementById('cloud-sync');
+  if (!el) return;
+  try {
+    const s = await (await fetch('/cloud/status')).json();
+    if (s.last_error) el.textContent = `Cloud: offline, ${s.pending} waiting`;
+    else if (s.pending) el.textContent = `Cloud: uploading ${s.pending}`;
+    else if (s.last_ok) el.textContent = 'Cloud: up to date';
+    else el.textContent = 'Cloud: connecting…';
+  } catch (error) {
+    el.textContent = 'Cloud: status unavailable';
+  }
+}
+refreshCloudStatus();
+setInterval(refreshCloudStatus, 10000);
+{% endif %}
 </script>
 </body>
 </html>

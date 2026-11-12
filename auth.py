@@ -18,7 +18,7 @@ if DATA_DIR:
     os.makedirs(DATA_DIR, exist_ok=True)
 AUTH_DB = os.path.join(DATA_DIR, "users.db") if DATA_DIR else os.path.join(BASE_DIR, "users.db")
 
-MIN_PASSWORD_LEN = 14
+MIN_PASSWORD_LEN = 8
 USERNAME_RE = re.compile(r'^[A-Za-z0-9_.-]{3,32}$')
 
 
@@ -239,6 +239,12 @@ def _init_session_owners():
             user_id INTEGER NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
     _q("CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(user_id)")
+    # The name the user typed. session_id is the internal (folder) name, which
+    # gets a short suffix when another account already uses the same name.
+    try:
+        _q("ALTER TABLE session_owners ADD COLUMN display_name TEXT")
+    except sqlite3.OperationalError:
+        pass
 
 
 def first_user_id():
@@ -273,14 +279,27 @@ def get_session_owner(session_id):
     return rows[0]["user_id"] if rows else None
 
 
-def set_session_owner(session_id, user_id):
+def set_session_owner(session_id, user_id, display_name=None):
     """Records the owner of a session that has none yet.  Never takes a session
     away from its current owner.  Returns True if `user_id` owns it afterwards."""
     if user_id is None:
         return False
-    _q("INSERT OR IGNORE INTO session_owners (session_id, user_id) VALUES (?, ?)",
-       (session_id, user_id))
+    _q("INSERT OR IGNORE INTO session_owners (session_id, user_id, display_name) VALUES (?, ?, ?)",
+       (session_id, user_id, display_name))
     return get_session_owner(session_id) == user_id
+
+
+def find_owned_session(user_id, display_name):
+    """The user's own session with this name, or None."""
+    rows = _q("SELECT session_id FROM session_owners WHERE user_id=? "
+              "AND COALESCE(display_name, session_id)=? ORDER BY created_at DESC LIMIT 1",
+              (user_id, display_name), fetch=True)
+    return rows[0]["session_id"] if rows else None
+
+
+def session_display_name(session_id):
+    rows = _q("SELECT display_name FROM session_owners WHERE session_id=?", (session_id,), fetch=True)
+    return (rows[0]["display_name"] if rows else None) or session_id
 
 
 def remove_session_owner(session_id):

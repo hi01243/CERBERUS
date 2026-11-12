@@ -96,6 +96,7 @@ class SessionRecorder:
         write() call opens a fresh one. Caller must already hold self.lock."""
         self.writer.release()
         threading.Thread(target=_finalize, args=(self._tmp, self._final, self._codec),
+                         name="finalize-recording",
                          daemon=True).start()
         self.writer = None
 
@@ -127,7 +128,8 @@ class SessionRecorder:
             self.writer.release()
             self.writer = None
             args = (self._tmp, self._final, self._codec)
-        threading.Thread(target=_finalize, args=args, daemon=True).start()
+        threading.Thread(target=_finalize, args=args, daemon=True,
+                         name="finalize-recording").start()
 
 
 def _low_priority_kwargs():
@@ -206,10 +208,47 @@ def init_incident_db():
         _q("ALTER TABLE incidents ADD COLUMN dismissed INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Cloud sync bookkeeping (cloud_sync.py): every change bumps `rev`; the
+    # sync worker uploads rows where rev > synced_rev. thumb_synced_conf is
+    # the confidence of the image last uploaded (re-upload when it improves).
+    for ddl in ("ALTER TABLE incidents ADD COLUMN rev INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE incidents ADD COLUMN synced_rev INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE incidents ADD COLUMN thumb_synced_conf REAL",
+                # When the flag was last dismissed or restored (UTC ISO). The
+                # newest change wins when two PCs change the same flag.
+                "ALTER TABLE incidents ADD COLUMN dismissed_at TEXT"):
+        try:
+            _q(ddl)
+        except sqlite3.OperationalError:
+            pass
+    # Sessions deleted locally whose cloud copy still has to be removed.
+    _q("""CREATE TABLE IF NOT EXISTS cloud_deletes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner TEXT NOT NULL, session_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+
+def utc_now_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def dismiss_incident(inc_id, dismissed=True):
-    _q("UPDATE incidents SET dismissed=? WHERE id=?", (1 if dismissed else 0, inc_id))
+    """Dismiss (dismissed=True) or restore (False) a flag made on this PC."""
+    _q("UPDATE incidents SET dismissed=?, dismissed_at=?, rev=rev+1 WHERE id=?",
+       (1 if dismissed else 0, utc_now_iso(), inc_id))
+
+
+def apply_cloud_dismiss(inc_id, dismissed, dismissed_at):
+    """Take a dismiss/restore made on another PC, unless this PC changed the
+    flag more recently. Returns True if the local row changed."""
+    with closing(sqlite3.connect(INCIDENT_DB, timeout=10)) as con:
+        cur = con.execute(
+            "UPDATE incidents SET dismissed=?, dismissed_at=? WHERE id=? "
+            "AND (dismissed_at IS NULL OR dismissed_at < ?)",
+            (1 if dismissed else 0, dismissed_at, inc_id, dismissed_at))
+        con.commit()
+        return cur.rowcount == 1
 
 
 def create_incident(session_id, camera_id, track_id, vtype, offset, conf, recording, thumb):
@@ -220,9 +259,10 @@ def create_incident(session_id, camera_id, track_id, vtype, offset, conf, record
 
 def update_incident(inc_id, end_offset, conf=None):
     if conf is None:
-        _q("UPDATE incidents SET end_offset=? WHERE id=?", (end_offset, inc_id))
+        _q("UPDATE incidents SET end_offset=?, rev=rev+1 WHERE id=?", (end_offset, inc_id))
     else:
-        _q("UPDATE incidents SET end_offset=?, confidence=? WHERE id=?", (end_offset, conf, inc_id))
+        _q("UPDATE incidents SET end_offset=?, confidence=?, rev=rev+1 WHERE id=?",
+           (end_offset, conf, inc_id))
 
 
 def list_incidents(session_id):

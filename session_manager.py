@@ -14,10 +14,11 @@ from recording import (
 from database import clear_violations
 from auth import (
     get_session_owner, set_session_owner, remove_session_owner,
-    list_owned_sessions, first_user_id
+    list_owned_sessions, first_user_id, session_display_name
 )
 import state
-from camera_manager import _finish_recording, _clear_tracking_state
+import cloud_sync
+from camera_manager import _finish_recording, _clear_tracking_state, pause_camera
 
 
 def _valid_session_id(session_id):
@@ -68,9 +69,12 @@ def _session_summaries():
     summaries.setdefault(state.CURRENT_SESSION, {
         'session_id': state.CURRENT_SESSION, 'flag_count': 0, 'updated_at': None,
     })
-    owned = set(list_owned_sessions(session.get('user_id')))
+    uid = session.get('user_id')
+    owned = set(list_owned_sessions(uid))
     summaries = {sid: s for sid, s in summaries.items() if sid in owned}
     for summary in summaries.values():
+        summary['name'] = session_display_name(summary['session_id'])
+        summary['remote'] = False
         summary['recordings'] = _session_recordings(summary['session_id'])
         summary['recording_count'] = len(summary['recordings'])
         if summary['recordings']:
@@ -78,17 +82,39 @@ def _session_summaries():
                 summary['updated_at'] or '',
                 datetime.fromtimestamp(summary['recordings'][0]['modified']).isoformat(timespec='seconds'),
             )
+
+    # Cloud mode: also list this account's sessions recorded on other PCs.
+    # A problem here must never hide the sessions stored on this PC.
+    try:
+        remote = cloud_sync.remote_sessions(uid)
+    except Exception:
+        import traceback
+        print("[sessions] could not list sessions from other PCs:\n" + traceback.format_exc())
+        remote = {}
+    for sid, info in remote.items():
+        if sid in summaries:
+            summaries[sid]['flag_count'] += info['flag_count']
+            summaries[sid]['updated_at'] = max(summaries[sid]['updated_at'] or '', info['updated_at'] or '')
+            continue
+        summaries[sid] = {'session_id': sid, 'name': info['name'] or sid, 'remote': True,
+                          'flag_count': info['flag_count'], 'updated_at': info['updated_at'],
+                          'recordings': [], 'recording_count': 0}
     current = summaries.get(state.CURRENT_SESSION)
-    if current and not current['recording_count'] and not current['flag_count']:
+    if current and not current.get('remote') and not current['recording_count'] and not current['flag_count']:
         summaries.pop(state.CURRENT_SESSION)
     return sorted(summaries.values(), key=lambda item: item['updated_at'] or '', reverse=True)
 
 
-def _delete_session_data(session_id):
+def _delete_session_data(session_id, cloud_cleanup=True):
+    """Deletes a session's rows, recordings and evidence on this PC. With
+    cloud_cleanup, its cloud copy is queued for removal too (cloud mode)."""
     deleting_current = session_id == state.CURRENT_SESSION
     if deleting_current:
         for entry in list(state.camera_registry.values()):
             _finish_recording(entry)
+
+    if cloud_cleanup:
+        cloud_sync.queue_session_delete(session_id, get_session_owner(session_id))
 
     clear_violations(session_id)
     clear_incidents(session_id)
@@ -110,6 +136,27 @@ def _delete_session_data(session_id):
             entry["recorder"] = SessionRecorder(state.CURRENT_SESSION, cam_id)
             entry["incidents"] = IncidentTracker()
     return state.CURRENT_SESSION
+
+
+def _session_id_free(session_id):
+    """True if no account owns this internal id and no data on this PC uses it."""
+    return get_session_owner(session_id) is None and session_id not in _all_known_session_ids()
+
+
+def _stop_live_for(user_id):
+    """Sign-out: if this account owns the live session, stop monitoring, pause
+    every camera (webcam off) and finish the open recordings."""
+    if user_id is None or get_session_owner(state.CURRENT_SESSION) != user_id:
+        return False
+    was_active = state.monitoring_active
+    state.monitoring_active = False
+    for cam_id, entry in list(state.camera_registry.items()):
+        if entry.get("status") == "active":
+            pause_camera(cam_id)
+        _finish_recording(entry)
+    if was_active:
+        print(f"[session] monitoring stopped: {session.get('username', 'user')} signed out")
+    return True
 
 
 def _owns_current():
@@ -211,6 +258,9 @@ def _guard_session_access():
             if must_be_valid:
                 abort(404)
         elif get_session_owner(sid) != uid:
-            abort(404)
+            # Read-only views of this account's sessions from other PCs.
+            # The routes themselves only return local data the user owns.
+            if not (ep in SESSION_QUERY_ENDPOINTS and cloud_sync.is_remote_session(uid, sid)):
+                abort(404)
     return None
 

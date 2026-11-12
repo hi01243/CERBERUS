@@ -21,7 +21,8 @@ from recording import (
     list_incidents, dismiss_incident, SessionRecorder, IncidentTracker
 )
 from auth import (
-    init_auth_db, get_totp_secret, get_session_owner, set_session_owner, first_user_id
+    init_auth_db, get_totp_secret, get_session_owner, set_session_owner, first_user_id,
+    find_owned_session, session_display_name
 )
 from camera_manager import (
     BrowserCapture, add_camera, activate_camera, pause_camera,
@@ -29,9 +30,11 @@ from camera_manager import (
 )
 from session_manager import (
     _valid_session_id, _session_recordings, _session_summaries,
-    _delete_session_data, _owns_current, _assign_unowned_sessions
+    _delete_session_data, _owns_current, _assign_unowned_sessions, _session_id_free
 )
 from auth_routes import init_auth_routes
+import cloud
+import cloud_sync
 
 print(f"[cerberus] app.py build {BUILD_ID}")
 _where = ("GPU: " + _GPU_NAME) if _CUDA else "CPU (torch.cuda.is_available() is False)"
@@ -45,10 +48,55 @@ init_incident_db()
 init_auth_db()
 cleanup_orphaned_recordings()
 
-_assign_unowned_sessions(first_user_id())
+CLOUD_MODE = cloud.enabled()
+if not CLOUD_MODE:
+    # Local accounts only: sessions from before ownership existed go to the
+    # first local account. Never done in cloud mode, so nothing made with
+    # local (test) accounts is ever handed to, or uploaded for, a cloud account.
+    _assign_unowned_sessions(first_user_id())
+print("[cerberus] accounts: " + ("cloud (Supabase) " + cloud.SUPABASE_URL if CLOUD_MODE
+                                 else "local (this PC only)"))
+
+
+def _register_default_camera():
+    """Put this computer's default webcam (device 0) on the dashboard at start-up,
+    so it is ready to 'Use' without Scan/Add. It is only registered, not opened:
+    the webcam light stays off until someone clicks Use. Set
+    CERBERUS_DEFAULT_CAMERA to another device index, or to 'none' to skip this."""
+    raw = os.environ.get("CERBERUS_DEFAULT_CAMERA", "0").strip().lower()
+    if raw in ("", "none", "off", "-1"):
+        return
+    if not raw.isdigit():
+        print(f"[cerberus] ignoring CERBERUS_DEFAULT_CAMERA={raw!r}: not a device index")
+        return
+    add_camera(int(raw), "local", "Default camera")
+
+
+_register_default_camera()
 
 # Register auth and security routes / middleware
-init_auth_routes(app)
+if CLOUD_MODE:
+    from cloud_auth_routes import init_cloud_auth_routes
+    init_cloud_auth_routes(app)
+    cloud_sync.start()
+else:
+    init_auth_routes(app)
+
+
+@app.context_processor
+def _inject_mode():
+    return {"cloud_mode": CLOUD_MODE}
+
+
+def _mfa_enabled_for_current_user():
+    if CLOUD_MODE:
+        return bool(session.get('mfa_enabled'))
+    return bool(get_totp_secret(session.get('user_id')))
+
+
+@app.route('/cloud/status')
+def cloud_status_route():
+    return jsonify(cloud_sync.status(session.get('user_id')))
 
 
 # ==========================================
@@ -61,7 +109,7 @@ def index():
         'sessions.html',
         current_session=state.CURRENT_SESSION if _owns_current() else None,
         monitoring_active=bool(state.monitoring_active and _owns_current()),
-        mfa_enabled=bool(get_totp_secret(session.get('user_id')))
+        mfa_enabled=_mfa_enabled_for_current_user()
     )
 
 
@@ -77,7 +125,10 @@ def review():
     session_id = request.args.get('session_id', state.CURRENT_SESSION)
     if not _valid_session_id(session_id):
         return redirect(url_for('index'))
-    return render_template('review.html', session_id=session_id)
+    return render_template('review.html', session_id=session_id,
+                           session_name=(session_display_name(session_id)
+                                         if get_session_owner(session_id) == session.get('user_id')
+                                         else cloud_sync.remote_session_name(session.get('user_id'), session_id)))
 
 
 # ==========================================
@@ -86,7 +137,12 @@ def review():
 
 @app.route('/sessions')
 def sessions_route():
-    return jsonify(_session_summaries())
+    try:
+        return jsonify(_session_summaries())
+    except Exception:
+        import traceback
+        print("[sessions] could not build the session list:\n" + traceback.format_exc())
+        return jsonify({"message": "Could not load sessions."}), 500
 
 
 @app.route('/session_files')
@@ -94,12 +150,15 @@ def session_files_route():
     session_id = request.args.get('session_id', '')
     if not _valid_session_id(session_id):
         return jsonify({'message': 'Invalid session.'}), 400
+    if get_session_owner(session_id) != session.get('user_id'):
+        return jsonify([])   # another PC's session: its videos are not on this PC
     return jsonify(_session_recordings(session_id))
 
 
 @app.route('/session', methods=['GET'])
 def get_session_route():
-    return jsonify({"session_id": state.CURRENT_SESSION})
+    return jsonify({"session_id": state.CURRENT_SESSION,
+                    "session_name": session_display_name(state.CURRENT_SESSION)})
 
 
 @app.route('/session/new', methods=['POST'])
@@ -121,16 +180,21 @@ def new_session_route():
         return jsonify({"status": "error", "message": "Session name has no usable characters."}), 400
 
     uid = session.get('user_id')
-    existing_owner = get_session_owner(safe_name)
-    if existing_owner is not None and existing_owner != uid:
-        return jsonify({"status": "error",
-                        "message": "That session name is already in use. Choose another."}), 409
-    set_session_owner(safe_name, uid)
+    # Reuse your own session of that name; otherwise make a new internal id.
+    # Another account may use the same name: its folders are kept apart by
+    # a short suffix on the internal id, while both see the name they typed.
+    display_name = re.sub(r'\s+', ' ', name)[:64]
+    session_id = find_owned_session(uid, display_name)
+    if session_id is None:
+        session_id = safe_name
+        while not _session_id_free(session_id):
+            session_id = f"{safe_name[:57]}-{secrets.token_hex(3)}"
+        set_session_owner(session_id, uid, display_name=display_name)
 
     for _entry in list(state.camera_registry.values()):
         _finish_recording(_entry)
 
-    state.CURRENT_SESSION = safe_name
+    state.CURRENT_SESSION = session_id
     os.makedirs(os.path.join(VIOLATION_FOLDER, state.CURRENT_SESSION), exist_ok=True)
 
     for cam_id, entry in list(state.camera_registry.items()):
@@ -189,21 +253,54 @@ def incidents_route():
     session_id = request.args.get('session_id', state.CURRENT_SESSION)
     if not _valid_session_id(session_id):
         return jsonify({'message': 'Invalid session.'}), 400
-    rows = list_incidents(session_id)
+    uid = session.get('user_id')
+    rows = list_incidents(session_id) if get_session_owner(session_id) == uid else []
     for r in rows:
         r['video_url'] = f"/recordings/{r['recording']}" if r['recording'] else None
         thumb_path = r.get('thumb') or ''
         if thumb_path.startswith('violations/'):
             thumb_path = thumb_path[len('violations/'):]
         r['thumb_url'] = url_for('serve_evidence', filepath=thumb_path) if thumb_path else None
+        r['remote'] = False
+    # Cloud mode: flags this account recorded on other PCs (image only).
+    for r in cloud_sync.remote_incidents(uid, session_id):
+        r['thumb_url'] = (url_for('cloud_evidence_route', object_name=r['thumb_path'])
+                          if r.get('thumb_path') else None)
+        rows.append(r)
     return jsonify(rows)
+
+
+@app.route('/cloud-evidence/<path:object_name>')
+def cloud_evidence_route(object_name):
+    data = cloud_sync.fetch_evidence(session.get('user_id'), object_name)
+    if data is None:
+        return "Not found", 404
+    response = Response(data, mimetype='image/jpeg')
+    response.headers['Cache-Control'] = 'private, max-age=3600'
+    return response
 
 
 @app.route('/incidents/<int:inc_id>/dismiss', methods=['POST'])
 def dismiss_incident_route(inc_id):
-    dismiss_incident(inc_id, True)
-    print(f"[incidents] {session.get('username', 'unknown')} dismissed incident #{inc_id}")
-    return jsonify({"status": "dismissed", "id": inc_id})
+    """Dismiss a flag recorded on this PC, or restore it with {"dismissed": false}."""
+    dismissed = bool((request.get_json(silent=True) or {}).get("dismissed", True))
+    dismiss_incident(inc_id, dismissed)
+    action = "dismissed" if dismissed else "restored"
+    print(f"[incidents] {session.get('username', 'unknown')} {action} incident #{inc_id}")
+    return jsonify({"status": action, "id": inc_id, "dismissed": dismissed})
+
+
+@app.route('/incidents/remote/<int:cloud_id>/dismiss', methods=['POST'])
+def dismiss_remote_incident_route(cloud_id):
+    """Same, for a flag recorded on another PC (cloud mode). Row security in
+    Supabase only lets the signed-in account change its own flags."""
+    dismissed = bool((request.get_json(silent=True) or {}).get("dismissed", True))
+    error = cloud_sync.set_remote_dismissed(session.get('user_id'), cloud_id, dismissed)
+    if error:
+        return jsonify({"status": "error", "message": error}), 400
+    action = "dismissed" if dismissed else "restored"
+    print(f"[incidents] {session.get('username', 'unknown')} {action} other-PC flag #{cloud_id}")
+    return jsonify({"status": action, "id": f"r{cloud_id}", "dismissed": dismissed})
 
 
 @app.route('/recordings/<path:filepath>')
@@ -414,6 +511,7 @@ def system_stats():
         "rules":            dict(DETECTION_ENABLED),
         "build":            BUILD_ID,
         "session_id":       state.CURRENT_SESSION,
+        "session_name":     session_display_name(state.CURRENT_SESSION),
     })
 
 

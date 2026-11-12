@@ -1,0 +1,35 @@
+{% extends "cloud_base.html" %}
+{% block title %}Reset password{% endblock %}
+{% block heading %}RESET PASSWORD{% endblock %}
+{% block sub %}
+  {% if step == 'reset' %}
+    <p class="sub">If {{ email }} has a CERBERUS account, a code is on its way. Enter it with your new password.</p>
+  {% else %}
+    <p class="sub">Enter your account email. We'll email you a code to set a new password.</p>
+  {% endif %}
+{% endblock %}
+{% block fields %}
+  {% if step == 'reset' %}
+    <input type="hidden" name="step" value="reset">
+    <label for="code">Code from the email</label>
+    <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code"
+           pattern="[0-9]{6,10}" minlength="6" maxlength="10" autofocus required>
+    <label for="password">New password</label>
+    <input type="password" id="password" name="password" autocomplete="new-password" required
+           minlength="8" pattern="(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).*">
+    <p class="hint">At least 8 characters, including uppercase and lowercase letters, a number, and a symbol.</p>
+    <label for="password_confirm">Confirm new password</label>
+    <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required minlength="8">
+    <label for="mfa_code">Authenticator code (only if you turned on MFA)</label>
+    <input type="text" id="mfa_code" name="mfa_code" inputmode="numeric" autocomplete="one-time-code"
+           pattern="[0-9]{6}" minlength="6" maxlength="6">
+    <button type="submit">Set new password and sign in</button>
+    <p class="alt"><a href="/recover-account">Send the code to a different email</a></p>
+  {% else %}
+    <input type="hidden" name="step" value="email">
+    <label for="email">Email</label>
+    <input type="email" id="email" name="email" autocomplete="email" autofocus required>
+    <button type="submit">Email me a code</button>
+  {% endif %}
+  <p class="alt"><a href="/login">Back to sign in</a></p>
+{% endblock %}

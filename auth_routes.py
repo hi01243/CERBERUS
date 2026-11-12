@@ -25,8 +25,21 @@ from auth import (
 import state
 from session_manager import (
     _assign_unowned_sessions, _delete_session_data, _valid_session_id,
-    _guard_static, _guard_session_access
+    _guard_static, _guard_session_access, _stop_live_for
 )
+
+
+def totp_qr_data_uri(provisioning_uri):
+    """SVG QR code (as a data: URI) for an otpauth:// URI, or None without qrcode."""
+    if qrcode is None or SvgPathImage is None or not provisioning_uri:
+        return None
+    qr = qrcode.QRCode(border=4, box_size=8)
+    qr.add_data(provisioning_uri)
+    qr.make(fit=True)
+    image = qr.make_image(image_factory=SvgPathImage)
+    buffer = BytesIO()
+    image.save(buffer)
+    return 'data:image/svg+xml;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
 
 
 def init_auth_routes(app):
@@ -175,23 +188,14 @@ def init_auth_routes(app):
             session['pending_totp_secret'] = pending_secret
 
         qr_data_uri = None
-        if pending_secret and not active_secret and qrcode is not None and SvgPathImage is not None:
-            provisioning_uri = 'otpauth://totp/CERBERUS?' + urlencode({
+        if pending_secret and not active_secret:
+            qr_data_uri = totp_qr_data_uri('otpauth://totp/CERBERUS?' + urlencode({
                 'secret': pending_secret,
                 'issuer': 'CERBERUS',
                 'algorithm': 'SHA1',
                 'digits': 6,
                 'period': 30,
-            })
-            qr = qrcode.QRCode(border=4, box_size=8)
-            qr.add_data(provisioning_uri)
-            qr.make(fit=True)
-            image = qr.make_image(image_factory=SvgPathImage)
-            buffer = BytesIO()
-            image.save(buffer)
-            qr_data_uri = 'data:image/svg+xml;base64,' + base64.b64encode(
-                buffer.getvalue()
-            ).decode('ascii')
+            }))
 
         response = make_response(render_template(
             'mfa_setup.html', enabled=bool(active_secret), secret=pending_secret,
@@ -282,6 +286,7 @@ def init_auth_routes(app):
 
     @app.route('/logout', methods=['POST'])
     def logout():
+        _stop_live_for(session.get('user_id'))   # monitoring and cameras stop on sign-out
         session.clear()
         return redirect(url_for('login'))
 

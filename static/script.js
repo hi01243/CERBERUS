@@ -397,7 +397,7 @@ async function loadSessionId() {
         if (!res.ok) return;
         const data = await res.json();
         const tag = document.getElementById("sessionIdTag");
-        if (tag) tag.innerText = data.session_id || "-";
+        if (tag) tag.innerText = data.session_name || data.session_id || "-";
     } catch (err) {
         console.error("Failed to load session id:", err);
     }
@@ -463,7 +463,7 @@ async function loadStats() {
         }
 
         const tag = document.getElementById("sessionIdTag");
-        if (tag && data.session_id) tag.innerText = data.session_id;
+        if (tag && data.session_id) tag.innerText = data.session_name || data.session_id;
     } catch (err) {
         console.error("Failed to load telemetry:", err);
     }
@@ -547,7 +547,7 @@ function renderFeedAndGallery() {
         card.onclick = () => openModal(v);
 
         card.innerHTML = `
-            <img src="/static/${v.image_path}?t=${Date.now()}" loading="lazy">
+            <img src="${evidenceUrl(v.image_path)}?t=${Date.now()}" loading="lazy">
             <div class="gallery-info">
                 <strong>${(v.violation_type || 'UNKNOWN').replace(/_/g, ' ')}</strong>
                 <small>${v.timestamp || ''} ${cameraTag(v)} ${studentTag(v)}</small>
@@ -557,8 +557,16 @@ function renderFeedAndGallery() {
     });
 }
 
+// Evidence paths are stored as "violations/<session>/<camera>/<file>.jpg".
+// /evidence/ serves them from wherever the data folder is (the project folder
+// when run from source, %LOCALAPPDATA%\Cerberus in the desktop build).
+function evidenceUrl(imagePath) {
+    const rel = (imagePath || '').replace(/^violations\//, '');
+    return '/evidence/' + rel.split('/').map(encodeURIComponent).join('/');
+}
+
 function openModal(v) {
-    document.getElementById("modalImg").src = `/static/${v.image_path}`;
+    document.getElementById("modalImg").src = evidenceUrl(v.image_path);
     document.getElementById("modalType").innerText = (v.violation_type || 'INCIDENT').replace(/_/g, ' ');
     document.getElementById("modalTime").innerText = v.timestamp || '-';
     document.getElementById("modalConf").innerText = `${((v.confidence || 0.9) * 100).toFixed(1)}%`;

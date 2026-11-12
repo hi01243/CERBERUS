@@ -1,0 +1,21 @@
+{% extends "cloud_base.html" %}
+{% block fields %}
+  {% if mfa_step %}
+    <p class="sub">Enter the six-digit code from your authenticator app for {{ email }}.</p>
+    <input type="hidden" name="step" value="verify">
+    <label for="code">Authenticator code</label>
+    <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code"
+           pattern="[0-9]{6}" minlength="6" maxlength="6" autofocus required>
+    <button type="submit">Verify and sign in</button>
+    <p class="alt"><a href="/login">Use a different account</a></p>
+  {% else %}
+    <label for="email">Email</label>
+    <input type="email" id="email" name="email" autocomplete="email" autofocus required
+           value="{{ email or '' }}">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <p class="alt"><a href="/recover-account">Forgot your password?</a></p>
+    <p class="alt">No account yet? <a href="/signup">Sign up</a></p>
+  {% endif %}
+{% endblock %}

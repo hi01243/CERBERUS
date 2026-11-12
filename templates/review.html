@@ -20,7 +20,11 @@
   main { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:16px; padding:16px 20px; }
   @media (max-width:900px) { main { grid-template-columns:1fr; } }
   @media (max-width:560px) { header { flex-wrap:wrap; } header h1 { width:100%; } .review-nav { margin-left:auto; } }
-  video { width:100%; max-height:62vh; background:#000; border-radius:8px; }
+  video, #still { width:100%; max-height:62vh; background:#000; border-radius:8px; }
+  #still { display:block; object-fit:contain; aspect-ratio:16 / 9; }
+  #still[hidden], video[hidden] { display:none; }
+  .flag-actions { display:flex; flex-direction:column; align-items:flex-end; gap:5px; flex:none; }
+  .remote-badge { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:1px 6px; white-space:nowrap; }
   #timeline { position:relative; height:28px; margin-top:10px; background:var(--panel); border:1px solid var(--line); border-radius:6px; }
   .mark { position:absolute; top:4px; bottom:4px; min-width:5px; background:var(--flag); border:0; padding:0; border-radius:2px; }
   .mark.dismissed { background:var(--dim); }
@@ -54,7 +58,7 @@
 </head>
 <body>
 <header>
-  <h1><img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="26" style="display:inline-block;height:26px;width:auto;vertical-align:middle;margin-right:10px">Session: {{ session_id }}</h1>
+  <h1><img src="{{ url_for('static', filename='logo-symbol.svg') }}" alt="" height="26" style="display:inline-block;height:26px;width:auto;vertical-align:middle;margin-right:10px">Session: {{ session_name or session_id }}</h1>
   <nav class="review-nav" aria-label="Primary navigation">
     <a href="/">Sessions</a>
     <a href="/monitor">Monitor</a>
@@ -70,6 +74,7 @@
 <main>
   <section>
     <video id="player" controls preload="metadata"></video>
+    <img id="still" alt="Flag image" hidden>
     <div id="timeline" aria-label="Incidents in this recording"></div>
     <p id="note">Select an incident to play its recording from 5 seconds before the alert.</p>
   </section>
@@ -100,6 +105,22 @@ const GROUP_ACROSS_CAMERAS = false;
 const ts = inc => new Date(String(inc.created_at).replace(' ', 'T') + 'Z').getTime();
 
 const player = document.getElementById('player');
+const still = document.getElementById('still');
+
+// No video for this flag here (recorded on another PC, or the file is gone):
+// show the flag image where the video would be.
+function showStill(inc, message) {
+  player.pause();
+  player.hidden = true;
+  still.hidden = false;
+  still.src = inc.thumb_url || '';
+  timeline.innerHTML = '';
+  note.textContent = message;
+}
+function showVideo() {
+  still.hidden = true;
+  player.hidden = false;
+}
 const listEl = document.getElementById('list');
 const recordingListEl = document.getElementById('recording-list');
 const timeline = document.getElementById('timeline');
@@ -129,7 +150,7 @@ async function load() {
 function renderRecordings(recordings) {
   recordingListEl.replaceChildren();
   if (!recordings.length) {
-    recordingListEl.textContent = 'No recordings in this session.';
+    recordingListEl.textContent = 'No recordings of this session on this PC.';
     return;
   }
   for (const recording of recordings) {
@@ -148,6 +169,7 @@ function renderRecordings(recordings) {
       button.classList.add('active');
       current = null;
       currentRecording = recording.path;
+      showVideo();
       player.src = recording.url;
       note.textContent = 'Select a flag to jump to its point in this recording.';
       drawTimeline();
@@ -213,9 +235,13 @@ function render() {
           <div class="meta">at ${fmt(primary.start_offset)}, lasted ${dur}s, confidence ${Math.round(primary.confidence * 100)}%</div>
           ${camPicker}
         </div>
-        ${primary.dismissed
-          ? '<span class="dismiss-badge">Dismissed</span>'
-          : `<button class="dismiss-btn" data-dismiss="${primary.id}">Dismiss</button>`}
+        <div class="flag-actions">
+          ${primary.remote ? '<span class="remote-badge" title="Recorded on another PC">Other PC</span>' : ''}
+          ${primary.dismissed ? '<span class="dismiss-badge">Dismissed</span>' : ''}
+          <button class="dismiss-btn" data-toggle-dismiss="1"
+                  title="${primary.dismissed ? 'Put this flag back on the active list' : 'Mark this flag as a false positive (the evidence is kept)'}">
+            ${primary.dismissed ? 'Undo dismiss' : 'Dismiss'}</button>
+        </div>
       </div>`;
 
     card.querySelector('img')?.addEventListener('click', () => openIncident(primary));
@@ -235,22 +261,33 @@ function render() {
       };
     });
 
-    const dismissBtn = card.querySelector('[data-dismiss]');
+    const dismissBtn = card.querySelector('[data-toggle-dismiss]');
     if (dismissBtn) {
       dismissBtn.onclick = async (e) => {
         e.stopPropagation();
+        const dismiss = !primary.dismissed;   // Dismiss, or Undo dismiss
         dismissBtn.disabled = true;
         try {
           for (const m of g.members) {
-            const res = await fetch(`/incidents/${m.id}/dismiss`, { method: 'POST' });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            m.dismissed = 1;
+            // Flags from another PC are changed in the cloud; that PC picks it up.
+            const url = m.remote
+              ? `/incidents/remote/${String(m.id).slice(1)}/dismiss`
+              : `/incidents/${m.id}/dismiss`;
+            const res = await fetch(url, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ dismissed: dismiss })
+            });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              throw new Error(data.message || `HTTP ${res.status}`);
+            }
+            m.dismissed = dismiss ? 1 : 0;
           }
           render();
           drawTimeline();
         } catch (err) {
           console.error('Dismiss failed:', err);
-          alert('Could not dismiss this flag.');
+          alert((dismiss ? 'Could not dismiss this flag. ' : 'Could not restore this flag. ') + err.message);
           dismissBtn.disabled = false;
         }
       };
@@ -270,7 +307,13 @@ function openIncident(inc) {
   for (const c of listEl.children) {
     c.setAttribute('aria-current', String(c.dataset.ids.split(',').includes(String(inc.id))));
   }
-  if (!inc.video_url) { note.textContent = 'This incident has no recording.'; return; }
+  if (!inc.video_url) {
+    showStill(inc, inc.remote
+      ? 'Recorded on another PC. Its video stays on that PC, so the flag image is shown instead.'
+      : 'This flag has no recording on this PC, so the flag image is shown instead.');
+    return;
+  }
+  showVideo();
   note.textContent = '';
   const seek = () => { player.currentTime = Math.max(0, inc.start_offset - LEAD_IN); player.play().catch(() => {}); };
   if (player.src.endsWith(inc.video_url)) { seek(); }
@@ -297,6 +340,11 @@ function drawTimeline() {
 
 player.addEventListener('loadedmetadata', drawTimeline);
 player.addEventListener('error', () => {
+  if (!player.getAttribute('src')) return;
+  if (current && current.thumb_url) {
+    showStill(current, 'The video for this flag cannot be played (it may be missing or still being saved), so the flag image is shown instead.');
+    return;
+  }
   note.textContent = 'This recording cannot be played yet. It may still be processing after PAUSE, or the browser may not support its codec (install ffmpeg to fix this).';
 });
 document.getElementById('refresh').onclick = load;

@@ -32,7 +32,10 @@ echo         Found Python %PY_VER%
 :: ?? 2. Create virtual environment if it does not exist ???
 echo.
 echo  [2/4] Setting up virtual environment...
-if not exist "venv\Scripts\activate.bat" (
+:: Reuse an existing .venv (e.g. one with the CUDA build of PyTorch) before making venv.
+set "VENV=venv"
+if exist ".venv\Scripts\activate.bat" set "VENV=.venv"
+if not exist "%VENV%\Scripts\activate.bat" (
     echo         Creating venv...
     python -m venv venv
     if %errorlevel% neq 0 (
@@ -42,11 +45,11 @@ if not exist "venv\Scripts\activate.bat" (
     )
     echo         venv created successfully.
 ) else (
-    echo         venv already exists, skipping creation.
+    echo         Using existing %VENV%.
 )
 
 :: ?? 3. Activate venv ?????????????????????????????????????
-call venv\Scripts\activate.bat
+call %VENV%\Scripts\activate.bat
 
 :: ?? 4. Install / update dependencies ?????????????????????
 echo.
@@ -64,16 +67,21 @@ echo         Dependencies are up to date.
 echo.
 echo  [4/4] Starting Cerberus...
 echo.
-echo  =====================================================
-echo    Access the app at:  http://127.0.0.1:5000
-echo    Press Ctrl+C to stop the server.
-echo  =====================================================
-echo.
 
-:: Open the browser after a short delay (runs in background)
-start "" cmd /c "timeout /t 3 >nul && start http://127.0.0.1:5000"
-
-python app.py
+:: "run.bat web" keeps the old behaviour: server on port 5000 + system browser.
+if /i "%~1"=="web" (
+    echo  =====================================================
+    echo    Access the app at:  http://127.0.0.1:5000
+    echo    Press Ctrl+C to stop the server.
+    echo  =====================================================
+    echo.
+    start "" cmd /c "timeout /t 3 >nul && start http://127.0.0.1:5000"
+    python app.py
+) else (
+    echo  Opening the CERBERUS desktop window. Close the window to quit.
+    echo.
+    python desktop.py
+)
 
 :: ?? On exit ??????????????????????????????????????????????
 echo.

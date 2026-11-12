@@ -1,0 +1,12 @@
+{% extends "cloud_base.html" %}
+{% block title %}Confirm email{% endblock %}
+{% block heading %}CONFIRM YOUR EMAIL{% endblock %}
+{% block sub %}<p class="sub">We sent a code to {{ email }}. Enter it to finish creating your account.</p>{% endblock %}
+{% block fields %}
+  <label for="code">Code from the email</label>
+  <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code"
+         pattern="[0-9]{6,10}" minlength="6" maxlength="10" autofocus>
+  <button type="submit" name="action" value="verify">Confirm email</button>
+  <button type="submit" name="action" value="resend" class="secondary" formnovalidate>Send a new code</button>
+  <p class="alt"><a href="/login">Back to sign in</a></p>
+{% endblock %}

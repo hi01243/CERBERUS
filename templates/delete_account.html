@@ -32,7 +32,7 @@
   {% else %}
     <form method="post" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label for="confirm-username">Type your username to confirm</label>
+      <label for="confirm-username">Type your {{ 'email' if cloud_mode else 'username' }} to confirm</label>
       <input id="confirm-username" name="confirm_username" type="text" required spellcheck="false" autocomplete="off">
       <label for="password">Current password</label>
       <input id="password" name="password" type="password" required autocomplete="current-password">

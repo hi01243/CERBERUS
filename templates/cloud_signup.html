@@ -1,0 +1,20 @@
+{% extends "cloud_base.html" %}
+{% block title %}Sign up{% endblock %}
+{% block sub %}<p class="sub">Create a proctor account</p>{% endblock %}
+{% block fields %}
+  <label for="email">Email</label>
+  <input type="email" id="email" name="email" autocomplete="email" autofocus required
+         value="{{ request.form.get('email', '') }}">
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="new-password" required
+         minlength="8" pattern="(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).*">
+  <p class="hint">At least 8 characters, including uppercase and lowercase letters, a number, and a symbol.</p>
+  <label for="password_confirm">Confirm password</label>
+  <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required minlength="8">
+  <label class="option" for="enable_mfa">
+    <input type="checkbox" id="enable_mfa" name="enable_mfa" value="1">
+    <span>Set up authenticator MFA after creating the account.</span>
+  </label>
+  <button type="submit">Create account</button>
+  <p class="alt">Already have an account? <a href="/login">Sign in</a></p>
+{% endblock %}

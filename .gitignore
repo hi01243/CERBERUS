@@ -41,3 +41,12 @@ incidents.db
 *.bak
 *cerberus.db
 *.onnx
+# PyInstaller output (desktop build)
+build/
+dist/
+logs/
+
+# Supabase project settings (public key, but keep the project private)
+cloud_config.json
+device_id.txt
+installer/

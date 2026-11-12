@@ -236,7 +236,7 @@ PROHIBITED_CLASSES = {0: "CELL PHONE"}
 RESET_CONFIRM_PHRASE = "DELETE ALL DATA"
 
 # Endpoint categories for access control
-PUBLIC_ENDPOINTS = {"login", "signup", "recover_account"}
+PUBLIC_ENDPOINTS = {"login", "signup", "recover_account", "verify_email"}
 
 LIVE_ENDPOINTS = {
     "monitor", "video_feed", "get_session_route", "settings_route", "system_stats",

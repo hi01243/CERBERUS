@@ -31,9 +31,14 @@
 <main>
   <h1>Authenticator sign-in</h1>
   {% if enabled %}
+    {% if cloud_mode %}
+    <p>Authenticator MFA is enabled. Sign in with your email, password, and a code from your authenticator app.</p>
+    <button id="disable-mfa" class="secondary" type="button">Disable authenticator MFA</button>
+    {% else %}
     <p>Authenticator MFA is enabled. Sign in with your username, password, and an app code or unused recovery code.</p>
     <button id="disable-mfa" class="secondary" type="button">Disable authenticator MFA</button>
     <a class="codes" href="/security/recovery-codes">Manage recovery codes</a>
+    {% endif %}
   {% else %}
     <p>Scan this QR code with your authenticator app, or enter the setup key manually. Then enter the current six-digit code to enable sign-in MFA.</p>
     <div class="setup">
@@ -56,7 +61,7 @@
 <script>
 document.getElementById('disable-mfa').addEventListener('click', async () => {
   const button = document.getElementById('disable-mfa');
-  const code = prompt('Enter a current authenticator code or an unused recovery code:');
+  const code = prompt({{ ('Enter a current authenticator code:' if cloud_mode else 'Enter a current authenticator code or an unused recovery code:') | tojson }});
   if (!code) return;
   button.disabled = true;
   try {
